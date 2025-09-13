@@ -1,0 +1,110 @@
+nameOverride: risk-scorer
+
+image:
+  repository: us-docker.pkg.dev/PROJECT/REGISTRY/risk-scorer
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+container:
+  port: 8080
+  env:
+    - name: PORT
+      value: "8080"
+    - name: LOG_LEVEL
+      value: "info"
+    - name: GEMINI_API_KEY
+      value: "PLACEHOLDER_GEMINI_API_KEY"
+    - name: GEMINI_MODEL
+      value: "gemini-1.5-flash"
+    - name: GEMINI_PROJECT_ID
+      value: "PROJECT_ID"
+    - name: GEMINI_LOCATION
+      value: "us-central1"
+    - name: EXPLAIN_AGENT_URL
+      value: "http://explain-agent.fraudguard.svc.cluster.local:8080"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+hpa:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+rbac:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list"]
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations:
+    iam.gke.io/gcp-service-account: risk-scorer@PROJECT_ID.iam.gserviceaccount.com
+
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # Allow outbound to Gemini API
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow outbound to other fraudguard services
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: fraudguard
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+  ingress:
+    # Allow inbound from fraudguard namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: fraudguard
+      ports:
+        - protocol: TCP
+          port: 8080
+
+podSecurity:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+secretManager:
+  enabled: true
+  secretProviderClass:
+    spec:
+      parameters:
+        secrets: |
+          - resourceName: "projects/PROJECT_ID/secrets/gemini-api-key/versions/latest"
+            path: "gemini-api-key"

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: workload
+description: A generic Helm chart for FraudGuard workload services
+type: application
+version: 0.1.0
+appVersion: "dev"
+keywords:
+  - fraudguard
+  - microservice
+  - workload
+home: https://github.com/mohankrishnaalavala/fraudguard-boa
+sources:
+  - https://github.com/mohankrishnaalavala/fraudguard-boa
+maintainers:
+  - name: FraudGuard Team
+    email: team@fraudguard.example.com
