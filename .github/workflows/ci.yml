@@ -46,11 +46,11 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        ruff check services/ web/ --fix || true
+        ruff check services/ web/ --fix || echo "Ruff linting completed with warnings"
 
     - name: Format check with black
       run: |
-        black services/ web/ || true
+        black services/ web/ || echo "Black formatting completed with warnings"
 
     - name: Run tests
       run: |
