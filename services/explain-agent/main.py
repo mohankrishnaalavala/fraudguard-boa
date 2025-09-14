@@ -80,10 +80,10 @@ def init_database():
             logger.warning("failed_to_create_db_dir", error=str(e), path=db_dir)
             # Use current directory as fallback
             db_path = "audit.db"
-    
+
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS audit_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,7 +95,7 @@ def init_database():
             timestamp TEXT NOT NULL
         )
     """)
-    
+
     conn.commit()
     conn.close()
 
@@ -134,10 +134,10 @@ def save_audit_record(record: AuditRecord):
     db_path = DATABASE_URL.replace("sqlite:///", "")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     try:
         cursor.execute("""
-            INSERT OR REPLACE INTO audit_records 
+            INSERT OR REPLACE INTO audit_records
             (transaction_id, risk_score, rationale, explanation, action, timestamp)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
@@ -148,10 +148,10 @@ def save_audit_record(record: AuditRecord):
             record.action,
             record.timestamp.isoformat()
         ))
-        
+
         conn.commit()
         logger.info("audit_record_saved", transaction_id=record.transaction_id)
-        
+
     except Exception as e:
         logger.error("audit_record_save_failed", transaction_id=record.transaction_id, error=str(e))
         raise
@@ -173,13 +173,13 @@ async def send_to_action_orchestrator(record: AuditRecord):
                 timeout=10.0
             )
             response.raise_for_status()
-            
+
             logger.info(
                 "action_orchestrator_notified",
                 transaction_id=record.transaction_id,
                 action=record.action
             )
-            
+
     except httpx.HTTPError as e:
         logger.error(
             "action_orchestrator_failed",
@@ -196,13 +196,13 @@ async def process_risk_analysis(analysis: RiskAnalysis):
             transaction_id=analysis.transaction_id,
             risk_score=analysis.risk_score
         )
-        
+
         # Create user-friendly explanation
         explanation = create_user_friendly_explanation(analysis.risk_score, analysis.rationale)
-        
+
         # Determine recommended action
         action = determine_action(analysis.risk_score)
-        
+
         # Create audit record
         audit_record = AuditRecord(
             transaction_id=analysis.transaction_id,
@@ -212,21 +212,21 @@ async def process_risk_analysis(analysis: RiskAnalysis):
             action=action,
             timestamp=datetime.utcnow()
         )
-        
+
         # Save to database
         save_audit_record(audit_record)
-        
+
         # Send to action orchestrator
         await send_to_action_orchestrator(audit_record)
-        
+
         logger.info(
             "risk_analysis_processed",
             transaction_id=analysis.transaction_id,
             action=action
         )
-        
+
         return audit_record
-        
+
     except Exception as e:
         logger.error(
             "risk_analysis_processing_failed",
@@ -241,17 +241,17 @@ async def get_audit_record(transaction_id: str):
     db_path = DATABASE_URL.replace("sqlite:///", "")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     try:
         cursor.execute("""
             SELECT id, transaction_id, risk_score, rationale, explanation, action, timestamp
             FROM audit_records WHERE transaction_id = ?
         """, (transaction_id,))
-        
+
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Audit record not found")
-        
+
         return AuditRecord(
             id=row[0],
             transaction_id=row[1],
@@ -261,7 +261,7 @@ async def get_audit_record(transaction_id: str):
             action=row[5],
             timestamp=datetime.fromisoformat(row[6])
         )
-        
+
     finally:
         conn.close()
 
@@ -271,13 +271,13 @@ async def get_recent_audit_records(limit: int = 50):
     db_path = DATABASE_URL.replace("sqlite:///", "")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     try:
         cursor.execute("""
             SELECT id, transaction_id, risk_score, rationale, explanation, action, timestamp
             FROM audit_records ORDER BY timestamp DESC LIMIT ?
         """, (limit,))
-        
+
         rows = cursor.fetchall()
         return [
             AuditRecord(
@@ -291,7 +291,7 @@ async def get_recent_audit_records(limit: int = 50):
             )
             for row in rows
         ]
-        
+
     finally:
         conn.close()
 
