@@ -37,7 +37,7 @@ logger = structlog.get_logger()
 # Configuration
 PORT = int(os.getenv("PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///tmp/audit.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///var/run/audit.db")
 ACTION_ORCHESTRATOR_URL = os.getenv("ACTION_ORCHESTRATOR_URL", "http://action-orchestrator.fraudguard.svc.cluster.local:8080")
 
 # Set log level
@@ -70,7 +70,16 @@ class AuditRecord(BaseModel):
 def init_database():
     """Initialize SQLite database for audit records"""
     db_path = DATABASE_URL.replace("sqlite:///", "")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    # Create directory if it doesn't exist and is writable
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except OSError as e:
+            logger.warning("failed_to_create_db_dir", error=str(e), path=db_dir)
+            # Use current directory as fallback
+            db_path = "audit.db"
     
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
