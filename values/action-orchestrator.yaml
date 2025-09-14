@@ -1,7 +1,7 @@
 nameOverride: action-orchestrator
 
 image:
-  repository: us-docker.pkg.dev/PROJECT/REGISTRY/action-orchestrator
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/action-orchestrator
   tag: dev
   pullPolicy: IfNotPresent
 

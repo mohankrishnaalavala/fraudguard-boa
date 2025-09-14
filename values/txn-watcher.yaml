@@ -1,7 +1,7 @@
 nameOverride: txn-watcher
 
 image:
-  repository: us-docker.pkg.dev/PROJECT/REGISTRY/txn-watcher
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/txn-watcher
   tag: dev
   pullPolicy: IfNotPresent
 
