@@ -108,7 +108,7 @@ async def call_gemini_api(prompt: str) -> dict:
         # In production, implement actual Gemini API call
         if GEMINI_API_KEY == "PLACEHOLDER_GEMINI_API_KEY":
             logger.info("using_mock_gemini_response")
-            
+
             # Simple rule-based mock scoring for demo
             if "restaurant" in prompt.lower() and "22:" in prompt:
                 return {
@@ -125,7 +125,7 @@ async def call_gemini_api(prompt: str) -> dict:
                     "risk_score": 0.2,
                     "rationale": "Normal transaction pattern - low risk"
                 }
-        
+
         # Production Gemini API call would go here
         # Example structure:
         # async with httpx.AsyncClient() as client:
@@ -146,7 +146,7 @@ async def call_gemini_api(prompt: str) -> dict:
         #     )
         #     response.raise_for_status()
         #     return parse_gemini_response(response.json())
-        
+
     except Exception as e:
         logger.error("gemini_api_error", error=str(e))
         # Fallback to conservative scoring
@@ -165,12 +165,12 @@ async def send_to_explain_agent(risk_result: RiskScore):
                 timeout=10.0
             )
             response.raise_for_status()
-            
+
             logger.info(
                 "result_sent_to_explain_agent",
                 transaction_id=risk_result.transaction_id
             )
-            
+
     except httpx.HTTPError as e:
         logger.error(
             "explain_agent_send_failed",
@@ -188,13 +188,13 @@ async def analyze_transaction(transaction: Transaction):
             amount=transaction.amount,
             category=transaction.category
         )
-        
+
         # Create privacy-safe prompt
         prompt = create_risk_analysis_prompt(transaction)
-        
+
         # Call Gemini API
         gemini_result = await call_gemini_api(prompt)
-        
+
         # Create risk score response
         risk_score = RiskScore(
             transaction_id=transaction.transaction_id,
@@ -202,18 +202,18 @@ async def analyze_transaction(transaction: Transaction):
             rationale=gemini_result["rationale"],
             timestamp=datetime.utcnow()
         )
-        
+
         logger.info(
             "risk_analysis_completed",
             transaction_id=transaction.transaction_id,
             risk_score=risk_score.risk_score
         )
-        
+
         # Send to explain agent for further processing
         await send_to_explain_agent(risk_score)
-        
+
         return risk_score
-        
+
     except Exception as e:
         logger.error(
             "risk_analysis_failed",

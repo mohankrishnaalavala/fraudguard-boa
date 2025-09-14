@@ -72,8 +72,8 @@ watcher_status = {
 async def health_check():
     """Health check endpoint"""
     return {
-        "status": "healthy", 
-        "service": "txn-watcher", 
+        "status": "healthy",
+        "service": "txn-watcher",
         "timestamp": datetime.utcnow(),
         "watcher_running": watcher_status["running"]
     }
@@ -94,7 +94,7 @@ async def fetch_recent_transactions():
         # Demo: poll a few sample accounts
         sample_accounts = ["acc_001", "acc_002", "acc_003"]
         all_transactions = []
-        
+
         async with httpx.AsyncClient() as client:
             for account_id in sample_accounts:
                 try:
@@ -106,22 +106,22 @@ async def fetch_recent_transactions():
                     response.raise_for_status()
                     transactions = response.json()
                     all_transactions.extend(transactions)
-                    
+
                     logger.info(
                         "transactions_fetched",
                         account_id=account_id,
                         count=len(transactions)
                     )
-                    
+
                 except httpx.HTTPError as e:
                     logger.error(
                         "transaction_fetch_failed",
                         account_id=account_id,
                         error=str(e)
                     )
-        
+
         return all_transactions
-        
+
     except Exception as e:
         logger.error("fetch_transactions_error", error=str(e))
         return []
@@ -136,12 +136,12 @@ async def send_for_risk_analysis(transaction):
                 timeout=30.0
             )
             response.raise_for_status()
-            
+
             logger.info(
                 "transaction_sent_for_analysis",
                 transaction_id=transaction["transaction_id"]
             )
-            
+
     except httpx.HTTPError as e:
         logger.error(
             "risk_analysis_failed",
@@ -153,14 +153,14 @@ async def poll_transactions():
     """Main polling loop"""
     logger.info("transaction_watcher_started", poll_interval=POLL_INTERVAL_SECONDS)
     watcher_status["running"] = True
-    
+
     while True:
         try:
             watcher_status["last_poll"] = datetime.utcnow()
-            
+
             # Fetch recent transactions
             transactions = await fetch_recent_transactions()
-            
+
             # Process new transactions
             new_transactions = []
             for txn in transactions:
@@ -168,27 +168,27 @@ async def poll_transactions():
                 if txn_id not in processed_transactions:
                     processed_transactions.add(txn_id)
                     new_transactions.append(txn)
-            
+
             logger.info(
                 "poll_completed",
                 total_transactions=len(transactions),
                 new_transactions=len(new_transactions)
             )
-            
+
             # Send new transactions for risk analysis
             for txn in new_transactions:
                 await send_for_risk_analysis(txn)
                 watcher_status["processed_count"] += 1
-            
+
             # Clean up old processed transaction IDs to prevent memory growth
             if len(processed_transactions) > 10000:
                 # Keep only the most recent 5000
                 processed_transactions.clear()
                 logger.info("processed_transactions_cleared")
-            
+
         except Exception as e:
             logger.error("poll_error", error=str(e))
-        
+
         # Wait for next poll
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 

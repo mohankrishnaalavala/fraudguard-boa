@@ -82,20 +82,20 @@ def check_rate_limit(client_ip: str) -> bool:
     """Simple rate limiting check"""
     now = time.time()
     minute_ago = now - 60
-    
+
     if client_ip not in rate_limit_store:
         rate_limit_store[client_ip] = []
-    
+
     # Clean old entries
     rate_limit_store[client_ip] = [
-        timestamp for timestamp in rate_limit_store[client_ip] 
+        timestamp for timestamp in rate_limit_store[client_ip]
         if timestamp > minute_ago
     ]
-    
+
     # Check limit
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT_PER_MINUTE:
         return False
-    
+
     # Add current request
     rate_limit_store[client_ip].append(now)
     return True
@@ -108,10 +108,10 @@ async def get_client_ip(request: Request) -> str:
 async def logging_middleware(request: Request, call_next):
     """Log all requests with structured logging"""
     start_time = time.time()
-    
+
     # Generate request ID for tracing
     request_id = f"req_{int(start_time * 1000000)}"
-    
+
     logger.info(
         "request_started",
         request_id=request_id,
@@ -119,11 +119,11 @@ async def logging_middleware(request: Request, call_next):
         path=request.url.path,
         client_ip=request.client.host
     )
-    
+
     response = await call_next(request)
-    
+
     process_time = time.time() - start_time
-    
+
     logger.info(
         "request_completed",
         request_id=request_id,
@@ -132,7 +132,7 @@ async def logging_middleware(request: Request, call_next):
         status_code=response.status_code,
         process_time=process_time
     )
-    
+
     return response
 
 @app.get("/healthz")
@@ -146,28 +146,28 @@ async def get_account(account_id: str, client_ip: str = Depends(get_client_ip)):
     if not check_rate_limit(client_ip):
         logger.warning("rate_limit_exceeded", client_ip=client_ip, account_id=account_id)
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
+
     try:
         # Mock response for demo - in production, call actual BoA API
         logger.info("account_requested", account_id=account_id, client_ip=client_ip)
-        
+
         # Simulate API call to BoA
         account = Account(
             account_id=account_id,
             balance=1000.0 + hash(account_id) % 10000,
             account_type="checking"
         )
-        
+
         logger.info("account_retrieved", account_id=account_id)
         return account
-        
+
     except Exception as e:
         logger.error("account_retrieval_failed", account_id=account_id, error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/accounts/{account_id}/transactions", response_model=List[Transaction])
 async def get_recent_transactions(
-    account_id: str, 
+    account_id: str,
     limit: int = 10,
     client_ip: str = Depends(get_client_ip)
 ):
@@ -175,14 +175,14 @@ async def get_recent_transactions(
     if not check_rate_limit(client_ip):
         logger.warning("rate_limit_exceeded", client_ip=client_ip, account_id=account_id)
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
+
     try:
         logger.info("transactions_requested", account_id=account_id, limit=limit, client_ip=client_ip)
-        
+
         # Mock transactions for demo
         transactions = []
         base_time = datetime.utcnow()
-        
+
         for i in range(min(limit, 10)):
             transaction = Transaction(
                 transaction_id=f"txn_{account_id}_{i}",
@@ -194,10 +194,10 @@ async def get_recent_transactions(
                 location=f"City_{i % 3}"
             )
             transactions.append(transaction)
-        
+
         logger.info("transactions_retrieved", account_id=account_id, count=len(transactions))
         return transactions
-        
+
     except Exception as e:
         logger.error("transactions_retrieval_failed", account_id=account_id, error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")

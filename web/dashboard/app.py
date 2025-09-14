@@ -75,25 +75,25 @@ async def fetch_audit_records() -> List[Dict[str, Any]]:
                 timeout=10.0
             )
             response.raise_for_status()
-            
+
             records = response.json()
             logger.info("audit_records_fetched", count=len(records))
-            
+
             # Enhance records with display properties
             for record in records:
                 record["risk_color"] = get_risk_color(record["risk_score"])
                 record["action_icon"] = get_action_icon(record["action"])
                 record["risk_percentage"] = int(record["risk_score"] * 100)
-                
+
                 # Parse timestamp
                 if isinstance(record["timestamp"], str):
                     record["timestamp"] = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
-                
+
                 record["formatted_time"] = record["timestamp"].strftime("%H:%M:%S")
                 record["formatted_date"] = record["timestamp"].strftime("%Y-%m-%d")
-            
+
             return records
-            
+
     except Exception as e:
         logger.error("audit_records_fetch_failed", error=str(e))
         return []
@@ -112,14 +112,14 @@ async def dashboard():
     """Main dashboard page"""
     try:
         records = await fetch_audit_records()
-        
+
         # Calculate summary statistics
         total_transactions = len(records)
         high_risk_count = sum(1 for r in records if r["risk_score"] >= 0.8)
         medium_risk_count = sum(1 for r in records if 0.6 <= r["risk_score"] < 0.8)
         low_risk_count = sum(1 for r in records if 0.3 <= r["risk_score"] < 0.6)
         normal_count = sum(1 for r in records if r["risk_score"] < 0.3)
-        
+
         stats = {
             "total": total_transactions,
             "high_risk": high_risk_count,
@@ -127,14 +127,14 @@ async def dashboard():
             "low_risk": low_risk_count,
             "normal": normal_count
         }
-        
+
         return render_template(
             "dashboard.html",
             records=records,
             stats=stats,
             refresh_interval=REFRESH_INTERVAL_SECONDS * 1000  # Convert to milliseconds
         )
-        
+
     except Exception as e:
         logger.error("dashboard_render_failed", error=str(e))
         return render_template(
@@ -148,7 +148,7 @@ async def api_records():
     try:
         records = await fetch_audit_records()
         return jsonify(records)
-        
+
     except Exception as e:
         logger.error("api_records_failed", error=str(e))
         return jsonify({"error": "Failed to fetch records"}), 500
