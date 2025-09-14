@@ -109,22 +109,66 @@ async def call_gemini_api(prompt: str) -> dict:
         if GEMINI_API_KEY == "PLACEHOLDER_GEMINI_API_KEY":
             logger.info("using_mock_gemini_response")
 
-            # Simple rule-based mock scoring for demo
-            if "restaurant" in prompt.lower() and "22:" in prompt:
-                return {
-                    "risk_score": 0.7,
-                    "rationale": "Late night restaurant transaction - unusual pattern"
-                }
-            elif "online" in prompt.lower() and "$" in prompt and "500" in prompt:
-                return {
-                    "risk_score": 0.8,
-                    "rationale": "High-value online transaction - requires verification"
-                }
+            # Intelligent rule-based mock scoring for demo
+            import re
+
+            # Extract transaction details from prompt for intelligent analysis
+            amount_match = re.search(r'"amount":\s*(\d+\.?\d*)', prompt)
+            amount = float(amount_match.group(1)) if amount_match else 0
+
+            merchant_match = re.search(r'"merchant":\s*"([^"]*)"', prompt)
+            merchant = merchant_match.group(1) if merchant_match else ""
+
+            time_match = re.search(r'"timestamp":\s*"([^"]*)"', prompt)
+            timestamp = time_match.group(1) if time_match else ""
+
+            # Intelligent risk scoring based on patterns
+            risk_score = 0.1  # Base risk
+            risk_factors = []
+
+            # Amount-based risk
+            if amount > 1000:
+                risk_score += 0.4
+                risk_factors.append(f"High amount transaction (${amount})")
+            elif amount > 500:
+                risk_score += 0.2
+                risk_factors.append(f"Medium amount transaction (${amount})")
+
+            # Merchant-based risk
+            suspicious_merchants = ["suspicious", "unknown", "cash", "atm", "foreign"]
+            if any(word in merchant.lower() for word in suspicious_merchants):
+                risk_score += 0.3
+                risk_factors.append(f"Suspicious merchant: {merchant}")
+
+            # Time-based risk
+            if "T2" in timestamp or "T0" in timestamp:  # Late night/early morning
+                risk_score += 0.2
+                risk_factors.append("Late night transaction")
+
+            # Category-based patterns
+            if "electronics" in merchant.lower():
+                risk_score += 0.1
+                risk_factors.append("High-value electronics purchase")
+            elif "coffee" in merchant.lower() or "restaurant" in merchant.lower():
+                risk_score -= 0.1  # Lower risk for common purchases
+                risk_factors.append("Common merchant type")
+
+            # Cap risk score
+            risk_score = min(risk_score, 0.95)
+            risk_score = max(risk_score, 0.05)
+
+            # Generate rationale
+            if risk_score > 0.7:
+                rationale = f"HIGH RISK: {', '.join(risk_factors[:3])}"
+            elif risk_score > 0.4:
+                rationale = f"MEDIUM RISK: {', '.join(risk_factors[:2])}"
             else:
-                return {
-                    "risk_score": 0.2,
-                    "rationale": "Normal transaction pattern - low risk"
-                }
+                rationale = f"LOW RISK: Standard transaction pattern"
+
+            return {
+                "risk_score": round(risk_score, 2),
+                "rationale": rationale
+            }
 
         # Production Gemini API call would go here
         # Example structure:

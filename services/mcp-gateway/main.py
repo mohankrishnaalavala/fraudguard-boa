@@ -6,6 +6,8 @@ Provides read-only access with auth, rate limiting, and audit logging.
 import logging
 import os
 import time
+import sqlite3
+import threading
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 
@@ -41,6 +43,7 @@ PORT = int(os.getenv("PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
 BOA_BASE_URL = os.getenv("BOA_BASE_URL", "http://frontend.boa.svc.cluster.local:80")
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100"))
+DATABASE_PATH = os.getenv("DATABASE_PATH", "/var/run/transactions.db")
 
 # Set log level
 logging.getLogger().setLevel(getattr(logging, LOG_LEVEL))
@@ -61,6 +64,156 @@ app.add_middleware(
 
 # Simple in-memory rate limiting (use Redis in production)
 rate_limit_store: Dict[str, List[float]] = {}
+
+# Database connection with thread safety
+db_lock = threading.Lock()
+
+def init_database():
+    """Initialize SQLite database for transactions"""
+    try:
+        with sqlite3.connect(DATABASE_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    transaction_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    merchant TEXT NOT NULL,
+                    category TEXT,
+                    timestamp TEXT NOT NULL,
+                    location TEXT,
+                    created_at TEXT NOT NULL,
+                    risk_score REAL,
+                    risk_level TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_account_timestamp
+                ON transactions(account_id, timestamp DESC)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_created_at
+                ON transactions(created_at DESC)
+            """)
+            conn.commit()
+            logger.info("database_initialized", path=DATABASE_PATH)
+    except Exception as e:
+        logger.error("database_init_failed", error=str(e))
+        raise
+
+def store_transaction(transaction: dict) -> bool:
+    """Store transaction in database"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DATABASE_PATH) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO transactions
+                    (transaction_id, account_id, amount, merchant, category, timestamp, location, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    transaction["transaction_id"],
+                    transaction.get("account_id", transaction.get("user_id", "unknown")),
+                    transaction["amount"],
+                    transaction["merchant"],
+                    transaction.get("category", "unknown"),
+                    transaction["timestamp"],
+                    transaction.get("location"),
+                    datetime.utcnow().isoformat()
+                ))
+                conn.commit()
+                logger.info("transaction_stored", transaction_id=transaction["transaction_id"])
+                return True
+    except Exception as e:
+        logger.error("transaction_store_failed", transaction_id=transaction.get("transaction_id"), error=str(e))
+        return False
+
+async def trigger_risk_analysis(transaction: dict):
+    """Trigger risk analysis for a transaction"""
+    try:
+        risk_scorer_url = os.getenv("RISK_SCORER_URL", "http://risk-scorer.fraudguard.svc.cluster.local:8080")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{risk_scorer_url}/analyze",
+                json=transaction
+            )
+
+            if response.status_code == 200:
+                risk_data = response.json()
+                risk_score = risk_data.get("risk_score", 0.5)
+                risk_level = "high" if risk_score > 0.7 else "medium" if risk_score > 0.4 else "low"
+
+                # Update transaction with risk analysis
+                update_transaction_risk(transaction["transaction_id"], risk_score, risk_level)
+
+                logger.info("risk_analysis_completed",
+                           transaction_id=transaction["transaction_id"],
+                           risk_score=risk_score,
+                           risk_level=risk_level)
+            else:
+                logger.warning("risk_analysis_failed",
+                              transaction_id=transaction["transaction_id"],
+                              status_code=response.status_code)
+
+    except Exception as e:
+        logger.error("risk_analysis_error",
+                    transaction_id=transaction.get("transaction_id"),
+                    error=str(e))
+
+def update_transaction_risk(transaction_id: str, risk_score: float, risk_level: str):
+    """Update transaction with risk analysis results"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DATABASE_PATH) as conn:
+                conn.execute("""
+                    UPDATE transactions
+                    SET risk_score = ?, risk_level = ?
+                    WHERE transaction_id = ?
+                """, (risk_score, risk_level, transaction_id))
+                conn.commit()
+                logger.info("transaction_risk_updated",
+                           transaction_id=transaction_id,
+                           risk_score=risk_score,
+                           risk_level=risk_level)
+    except Exception as e:
+        logger.error("transaction_risk_update_failed",
+                    transaction_id=transaction_id,
+                    error=str(e))
+
+def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
+    """Get transactions for an account"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DATABASE_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT transaction_id, account_id, amount, merchant, category,
+                           timestamp, location, risk_score, risk_level
+                    FROM transactions
+                    WHERE account_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (account_id, limit))
+
+                transactions = []
+                for row in cursor.fetchall():
+                    transactions.append({
+                        "transaction_id": row["transaction_id"],
+                        "account_id": row["account_id"],
+                        "amount": row["amount"],
+                        "merchant": row["merchant"],
+                        "category": row["category"],
+                        "timestamp": row["timestamp"],
+                        "location": row["location"],
+                        "risk_score": row["risk_score"],
+                        "risk_level": row["risk_level"]
+                    })
+
+                logger.info("transactions_retrieved", account_id=account_id, count=len(transactions))
+                return transactions
+
+    except Exception as e:
+        logger.error("transaction_retrieval_failed", account_id=account_id, error=str(e))
+        return []
 
 class Transaction(BaseModel):
     """Transaction model"""
@@ -187,21 +340,36 @@ async def get_recent_transactions(
     try:
         logger.info("transactions_requested", account_id=account_id, limit=limit, client_ip=client_ip)
 
-        # Mock transactions for demo
-        transactions = []
-        base_time = datetime.utcnow()
+        # Get real transactions from database
+        transaction_data = get_account_transactions(account_id, limit)
 
-        for i in range(min(limit, 10)):
+        transactions = []
+        for txn_data in transaction_data:
             transaction = Transaction(
-                transaction_id=f"txn_{account_id}_{i}",
-                account_id=account_id,
-                amount=round(10.0 + (hash(f"{account_id}_{i}") % 500), 2),
-                merchant=f"Merchant_{i % 5}",
-                category=["grocery", "gas", "restaurant", "retail", "online"][i % 5],
-                timestamp=base_time - timedelta(hours=i),
-                location=f"City_{i % 3}"
+                transaction_id=txn_data["transaction_id"],
+                account_id=txn_data["account_id"],
+                amount=txn_data["amount"],
+                merchant=txn_data["merchant"],
+                category=txn_data["category"] or "unknown",
+                timestamp=datetime.fromisoformat(txn_data["timestamp"].replace('Z', '+00:00')),
+                location=txn_data["location"]
             )
             transactions.append(transaction)
+
+        # If no real transactions, return some sample data for demo
+        if not transactions:
+            base_time = datetime.utcnow()
+            for i in range(min(limit, 3)):
+                transaction = Transaction(
+                    transaction_id=f"sample_{account_id}_{i}",
+                    account_id=account_id,
+                    amount=round(10.0 + (hash(f"{account_id}_{i}") % 500), 2),
+                    merchant=f"Sample_Merchant_{i % 3}",
+                    category=["grocery", "gas", "restaurant"][i % 3],
+                    timestamp=base_time - timedelta(hours=i),
+                    location=f"Sample_City_{i % 2}"
+                )
+                transactions.append(transaction)
 
         logger.info("transactions_retrieved", account_id=account_id, count=len(transactions))
         return transactions
@@ -230,13 +398,23 @@ async def create_transaction(
             client_ip=client_ip
         )
 
-        # In a real implementation, this would:
-        # 1. Validate the transaction
-        # 2. Submit to Bank of Anthos
-        # 3. Trigger the fraud detection pipeline
+        # Store transaction in database
+        transaction_data = {
+            "transaction_id": transaction.transaction_id,
+            "account_id": transaction.user_id,  # Map user_id to account_id
+            "amount": transaction.amount,
+            "merchant": transaction.merchant,
+            "category": "unknown",  # Could be enhanced to detect category
+            "timestamp": transaction.timestamp.isoformat(),
+            "location": None  # Could be enhanced with location detection
+        }
 
-        # For demo purposes, we'll simulate success and trigger the pipeline
-        # The txn-watcher service will pick this up and process it
+        if not store_transaction(transaction_data):
+            raise HTTPException(status_code=500, detail="Failed to store transaction")
+
+        # Trigger risk analysis asynchronously
+        import asyncio
+        asyncio.create_task(trigger_risk_analysis(transaction_data))
 
         response = {
             "status": "accepted",
@@ -251,6 +429,55 @@ async def create_transaction(
     except Exception as e:
         logger.error("transaction_creation_failed", transaction_id=transaction.transaction_id, error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/recent-transactions")
+async def get_all_recent_transactions(
+    limit: int = 20,
+    client_ip: str = Depends(get_client_ip)
+):
+    """Get all recent transactions across all accounts for dashboard"""
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    try:
+        with db_lock:
+            with sqlite3.connect(DATABASE_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("""
+                    SELECT transaction_id, account_id, amount, merchant, category,
+                           timestamp, location, risk_score, risk_level, created_at
+                    FROM transactions
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                """, (limit,))
+
+                transactions = []
+                for row in cursor.fetchall():
+                    transactions.append({
+                        "transaction_id": row["transaction_id"],
+                        "account_id": row["account_id"],
+                        "amount": row["amount"],
+                        "merchant": row["merchant"],
+                        "category": row["category"],
+                        "timestamp": row["timestamp"],
+                        "location": row["location"],
+                        "risk_score": row["risk_score"],
+                        "risk_level": row["risk_level"] or "pending",
+                        "created_at": row["created_at"]
+                    })
+
+                logger.info("recent_transactions_retrieved", count=len(transactions))
+                return {"transactions": transactions}
+
+    except Exception as e:
+        logger.error("recent_transactions_failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    init_database()
 
 if __name__ == "__main__":
     import uvicorn

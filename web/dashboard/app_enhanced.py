@@ -235,39 +235,68 @@ def get_service_data():
             "explain_agent": check_service_health(EXPLAIN_AGENT_URL),
             "risk_scorer": check_service_health(RISK_SCORER_URL)
         }
-        
-        # Get mock transaction data (in real implementation, this would come from explain-agent)
-        transactions = [
-            {
-                "transaction_id": "txn_001",
-                "merchant": "Amazon",
-                "amount": 89.99,
-                "timestamp": "2025-09-14 19:45:00",
-                "risk_level": "normal"
-            },
-            {
-                "transaction_id": "txn_002", 
-                "merchant": "Gas Station XYZ",
-                "amount": 45.50,
-                "timestamp": "2025-09-14 19:30:00",
-                "risk_level": "low"
-            },
-            {
-                "transaction_id": "txn_003",
-                "merchant": "Unknown Merchant",
-                "amount": 1500.00,
-                "timestamp": "2025-09-14 19:15:00",
-                "risk_level": "high"
-            },
-            {
-                "transaction_id": "txn_004",
-                "merchant": "Coffee Shop",
-                "amount": 4.75,
-                "timestamp": "2025-09-14 19:00:00",
-                "risk_level": "normal"
-            }
-        ]
-        
+
+        # Get real transaction data from MCP Gateway
+        transactions = []
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(f"{MCP_GATEWAY_URL}/api/recent-transactions?limit=10")
+                if response.status_code == 200:
+                    data = response.json()
+                    raw_transactions = data.get("transactions", [])
+
+                    for txn in raw_transactions:
+                        # Determine risk level based on risk score or amount
+                        risk_level = txn.get("risk_level", "pending")
+                        if risk_level == "pending":
+                            # Simple rule-based risk assessment for demo
+                            amount = txn.get("amount", 0)
+                            if amount > 1000:
+                                risk_level = "high"
+                            elif amount > 500:
+                                risk_level = "medium"
+                            elif amount > 100:
+                                risk_level = "low"
+                            else:
+                                risk_level = "normal"
+
+                        # Format timestamp
+                        timestamp = txn.get("timestamp", "")
+                        if timestamp:
+                            try:
+                                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                                formatted_timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            except:
+                                formatted_timestamp = timestamp
+                        else:
+                            formatted_timestamp = "Unknown"
+
+                        transactions.append({
+                            "transaction_id": txn.get("transaction_id", "unknown"),
+                            "merchant": txn.get("merchant", "Unknown Merchant"),
+                            "amount": txn.get("amount", 0.0),
+                            "timestamp": formatted_timestamp,
+                            "risk_level": risk_level
+                        })
+
+                else:
+                    logger.warning(f"Failed to fetch transactions: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Error fetching transactions from MCP Gateway: {e}")
+
+        # If no real transactions, add some sample data
+        if not transactions:
+            transactions = [
+                {
+                    "transaction_id": "sample_001",
+                    "merchant": "Sample Store",
+                    "amount": 89.99,
+                    "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "risk_level": "normal"
+                }
+            ]
+
         # Calculate stats
         stats = {
             "high_risk": len([t for t in transactions if t["risk_level"] == "high"]),
@@ -275,13 +304,13 @@ def get_service_data():
             "low_risk": len([t for t in transactions if t["risk_level"] == "low"]),
             "normal": len([t for t in transactions if t["risk_level"] == "normal"])
         }
-        
+
         return {
             "service_status": service_status,
             "transactions": transactions,
             "stats": stats
         }
-        
+
     except Exception as e:
         logger.error(f"Error fetching service data: {e}")
         # Return fallback data
