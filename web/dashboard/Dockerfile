@@ -12,8 +12,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app_debug.py app.py
-# Note: Not copying templates for debug version
+COPY app_enhanced.py app.py
+# Note: Enhanced version with real data integration
 
 # Create necessary directories for read-only filesystem
 RUN mkdir -p /tmp /var/run && \

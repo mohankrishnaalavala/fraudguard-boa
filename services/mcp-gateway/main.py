@@ -72,6 +72,14 @@ class Transaction(BaseModel):
     timestamp: datetime = Field(..., description="Transaction timestamp")
     location: Optional[str] = Field(None, description="Transaction location")
 
+class TransactionRequest(BaseModel):
+    """Transaction creation request"""
+    transaction_id: str = Field(..., description="Unique transaction ID")
+    amount: float = Field(..., description="Transaction amount")
+    merchant: str = Field(..., description="Merchant name")
+    user_id: str = Field(..., description="User ID")
+    timestamp: datetime = Field(..., description="Transaction timestamp")
+
 class Account(BaseModel):
     """Account model"""
     account_id: str = Field(..., description="Account ID")
@@ -200,6 +208,48 @@ async def get_recent_transactions(
 
     except Exception as e:
         logger.error("transactions_retrieval_failed", account_id=account_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/transactions")
+async def create_transaction(
+    transaction: TransactionRequest,
+    client_ip: str = Depends(get_client_ip)
+):
+    """Create a new transaction and trigger fraud analysis"""
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip, transaction_id=transaction.transaction_id)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    try:
+        logger.info(
+            "transaction_created",
+            transaction_id=transaction.transaction_id,
+            amount=transaction.amount,
+            merchant=transaction.merchant,
+            user_id=transaction.user_id,
+            client_ip=client_ip
+        )
+
+        # In a real implementation, this would:
+        # 1. Validate the transaction
+        # 2. Submit to Bank of Anthos
+        # 3. Trigger the fraud detection pipeline
+
+        # For demo purposes, we'll simulate success and trigger the pipeline
+        # The txn-watcher service will pick this up and process it
+
+        response = {
+            "status": "accepted",
+            "transaction_id": transaction.transaction_id,
+            "message": "Transaction submitted for processing",
+            "timestamp": datetime.utcnow()
+        }
+
+        logger.info("transaction_accepted", transaction_id=transaction.transaction_id)
+        return response
+
+    except Exception as e:
+        logger.error("transaction_creation_failed", transaction_id=transaction.transaction_id, error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
