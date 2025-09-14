@@ -10,7 +10,7 @@ metadata:
     kubernetes.io/ingress.allow-http: "false"
 spec:
   rules:
-  - host: fraudguard.mohankrishnaalavala.dev
+  - host: fraudguard.mohankrishna.site
     http:
       paths:
       - path: /
@@ -56,7 +56,7 @@ metadata:
   namespace: fraudguard
 spec:
   domains:
-    - fraudguard.mohankrishnaalavala.dev
+    - fraudguard.mohankrishna.site
 ---
 apiVersion: v1
 kind: Service
