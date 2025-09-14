@@ -1,7 +1,7 @@
 nameOverride: mcp-gateway
 
 image:
-  repository: us-docker.pkg.dev/PROJECT/REGISTRY/mcp-gateway
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/mcp-gateway
   tag: dev
   pullPolicy: IfNotPresent
 
@@ -49,7 +49,7 @@ serviceAccount:
   name: ""
   annotations:
     # Workload Identity annotation for GCP
-    iam.gke.io/gcp-service-account: mcp-gateway@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: mcp-gateway@fraudguard-hackathon.iam.gserviceaccount.com
 
 networkPolicy:
   enabled: true

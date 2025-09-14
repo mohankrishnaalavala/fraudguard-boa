@@ -1,7 +1,7 @@
 nameOverride: explain-agent
 
 image:
-  repository: us-docker.pkg.dev/PROJECT/REGISTRY/explain-agent
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/explain-agent
   tag: dev
   pullPolicy: IfNotPresent
 

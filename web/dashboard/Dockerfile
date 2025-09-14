@@ -1,5 +1,5 @@
 # Use Python 3.11 slim image for smaller size
-FROM python:3.11-slim@sha256:f5b5c6f6d8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8e8b8
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app

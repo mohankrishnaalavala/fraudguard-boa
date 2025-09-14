@@ -1,7 +1,7 @@
 nameOverride: risk-scorer
 
 image:
-  repository: us-docker.pkg.dev/PROJECT/REGISTRY/risk-scorer
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/risk-scorer
   tag: dev
   pullPolicy: IfNotPresent
 
@@ -101,7 +101,7 @@ podSecurity:
       - ALL
 
 secretManager:
-  enabled: true
+  enabled: false
   secretProviderClass:
     spec:
       parameters:

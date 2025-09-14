@@ -111,6 +111,22 @@ build:
 	done
 	@echo "✅ All images built!"
 
+# Build and push Docker images to Artifact Registry
+build-push:
+	@echo "🐳 Building and pushing Docker images..."
+	@for service in $(SERVICES); do \
+		if [ "$$service" = "dashboard" ]; then \
+			echo "Building and pushing $$service..."; \
+			docker build -t us-docker.pkg.dev/fraudguard-hackathon/fraudguard/$$service:dev web/dashboard/; \
+			docker push us-docker.pkg.dev/fraudguard-hackathon/fraudguard/$$service:dev; \
+		else \
+			echo "Building and pushing $$service..."; \
+			docker build -t us-docker.pkg.dev/fraudguard-hackathon/fraudguard/$$service:dev services/$$service/; \
+			docker push us-docker.pkg.dev/fraudguard-hackathon/fraudguard/$$service:dev; \
+		fi; \
+	done
+	@echo "✅ All images built and pushed!"
+
 # Check service health
 health:
 	@echo "🏥 Checking service health..."
