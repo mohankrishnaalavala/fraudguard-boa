@@ -1,0 +1,73 @@
+name: boa-monitor
+namespace: fraudguard
+
+image:
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/boa-monitor
+  tag: latest
+  pullPolicy: Always
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+env:
+  - name: BOA_LEDGER_URL
+    value: "http://ledgerwriter.boa.svc.cluster.local:8080"
+  - name: BOA_ACCOUNTS_URL
+    value: "http://accounts-db.boa.svc.cluster.local:5432"
+  - name: MCP_GATEWAY_URL
+    value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
+  - name: POLL_INTERVAL
+    value: "10"
+  - name: LOG_LEVEL
+    value: "INFO"
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+podSecurityContext:
+  fsGroup: 1000
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
