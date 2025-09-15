@@ -146,7 +146,7 @@
         <div class="row mt-4 mb-3">
             <div class="col text-center">
                 <small class="text-muted">
-                    Last updated: <span id="last-updated">{{ moment().format('YYYY-MM-DD HH:mm:ss') }}</span>
+                    Last updated: <span id="last-updated">{{ current_time }}</span>
                 </small>
             </div>
         </div>
@@ -154,26 +154,10 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Auto-refresh functionality
-        let refreshInterval = {{ refresh_interval }};
-        let countdown = refreshInterval / 1000;
-        
-        function updateRefreshIndicator() {
-            document.getElementById('refresh-indicator').textContent = 
-                `Auto-refresh: ${countdown}s`;
-            countdown--;
-            
-            if (countdown < 0) {
-                location.reload();
-            }
-        }
-        
-        // Update countdown every second
-        setInterval(updateRefreshIndicator, 1000);
-        
-        // Update last updated timestamp
-        document.getElementById('last-updated').textContent = 
-            new Date().toLocaleString();
+        // Simple auto-refresh functionality
+        setTimeout(function() {
+            window.location.reload();
+        }, {{ refresh_interval }});
     </script>
 </body>
 </html>

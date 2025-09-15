@@ -1,102 +1,7 @@
-"""
-FraudGuard Dashboard - Read-only UI for transaction monitoring
-"""
-
-import logging
-import os
-import json
+from flask import Flask, jsonify
 from datetime import datetime
-from typing import List, Dict, Any
-
-import httpx
-from flask import Flask, render_template, jsonify
-import structlog
-
-# Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
-
-logger = structlog.get_logger()
-
-# Configuration
-PORT = int(os.getenv("PORT", "8080"))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
-EXPLAIN_AGENT_URL = os.getenv("EXPLAIN_AGENT_URL", "http://explain-agent.fraudguard.svc.cluster.local:8080")
-REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "10"))
-
-# Set log level
-logging.getLogger().setLevel(getattr(logging, LOG_LEVEL))
 
 app = Flask(__name__)
-
-def get_risk_color(risk_score: float) -> str:
-    """Get color class based on risk score"""
-    if risk_score >= 0.8:
-        return "danger"
-    elif risk_score >= 0.6:
-        return "warning"
-    elif risk_score >= 0.3:
-        return "info"
-    else:
-        return "success"
-
-def get_action_icon(action: str) -> str:
-    """Get icon for action type"""
-    icons = {
-        "hold": "🚨",
-        "step-up": "⚠️",
-        "notify": "⚡",
-        "allow": "✅"
-    }
-    return icons.get(action, "❓")
-
-async def fetch_audit_records() -> List[Dict[str, Any]]:
-    """Fetch recent audit records from explain agent"""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{EXPLAIN_AGENT_URL}/audit",
-                params={"limit": 50},
-                timeout=10.0
-            )
-            response.raise_for_status()
-
-            records = response.json()
-            logger.info("audit_records_fetched", count=len(records))
-
-            # Enhance records with display properties
-            for record in records:
-                record["risk_color"] = get_risk_color(record["risk_score"])
-                record["action_icon"] = get_action_icon(record["action"])
-                record["risk_percentage"] = int(record["risk_score"] * 100)
-
-                # Parse timestamp
-                if isinstance(record["timestamp"], str):
-                    record["timestamp"] = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
-
-                record["formatted_time"] = record["timestamp"].strftime("%H:%M:%S")
-                record["formatted_date"] = record["timestamp"].strftime("%Y-%m-%d")
-
-            return records
-
-    except Exception as e:
-        logger.error("audit_records_fetch_failed", error=str(e))
-        return []
 
 @app.route("/healthz")
 def health_check():
@@ -121,7 +26,7 @@ def dashboard():
         <div class="container mt-4">
             <h1>🛡️ FraudGuard Dashboard</h1>
             <p class="lead">Real-time transaction risk monitoring</p>
-
+            
             <div class="row mb-4">
                 <div class="col-md-3">
                     <div class="card">
@@ -156,7 +61,7 @@ def dashboard():
                     </div>
                 </div>
             </div>
-
+            
             <div class="card">
                 <div class="card-header">
                     <h5>Recent Transactions</h5>
@@ -193,17 +98,5 @@ def dashboard():
     </html>
     """
 
-@app.route("/api/records")
-async def api_records():
-    """API endpoint for fetching records (for AJAX updates)"""
-    try:
-        records = await fetch_audit_records()
-        return jsonify(records)
-
-    except Exception as e:
-        logger.error("api_records_failed", error=str(e))
-        return jsonify({"error": "Failed to fetch records"}), 500
-
 if __name__ == "__main__":
-    logger.info("starting_dashboard", port=PORT, explain_agent_url=EXPLAIN_AGENT_URL)
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=8080, debug=False)

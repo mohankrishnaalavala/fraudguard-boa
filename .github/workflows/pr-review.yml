@@ -59,12 +59,28 @@ jobs:
       id: security_scan
       run: |
         echo "### 🔒 Security Scan Results" >> quality_report.md
-        
-        # Check for common security issues
-        if grep -r "password\|secret\|key" --include="*.py" --include="*.yaml" --include="*.yml" services/ web/ | grep -v "# nosec" | grep -v "test_" | head -5; then
+
+        # Check for common security issues, excluding legitimate risk analysis keywords
+        if grep -r "password\|secret\|key" --include="*.py" --include="*.yaml" --include="*.yml" services/ web/ | \
+           grep -v "# nosec" | \
+           grep -v "test_" | \
+           grep -v "suspicious_keywords" | \
+           grep -v "risk_patterns" | \
+           grep -v "keyword in merchant" | \
+           grep -v "High-risk merchant" | \
+           grep -v "keyword.*merchant" | \
+           head -5; then
           echo "⚠️ Potential secrets detected in code. Please review:" >> quality_report.md
           echo "\`\`\`" >> quality_report.md
-          grep -r "password\|secret\|key" --include="*.py" --include="*.yaml" --include="*.yml" services/ web/ | grep -v "# nosec" | grep -v "test_" | head -5 >> quality_report.md
+          grep -r "password\|secret\|key" --include="*.py" --include="*.yaml" --include="*.yml" services/ web/ | \
+            grep -v "# nosec" | \
+            grep -v "test_" | \
+            grep -v "suspicious_keywords" | \
+            grep -v "risk_patterns" | \
+            grep -v "keyword in merchant" | \
+            grep -v "High-risk merchant" | \
+            grep -v "keyword.*merchant" | \
+            head -5 >> quality_report.md
           echo "\`\`\`" >> quality_report.md
           echo "security_issues=true" >> $GITHUB_OUTPUT
         else
