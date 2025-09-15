@@ -105,33 +105,47 @@
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {% for record in records %}
+                                    {% for txn in transactions %}
                                     <tr>
                                         <td>
-                                            <div>{{ record.formatted_time }}</div>
-                                            <small class="text-muted">{{ record.formatted_date }}</small>
+                                            <div>{{ txn.formatted_time or 'Unknown' }}</div>
+                                            <small class="text-muted">{{ txn.formatted_date or 'Unknown' }}</small>
                                         </td>
                                         <td>
-                                            <code>{{ record.transaction_id }}</code>
+                                            <code>{{ txn.transaction_id }}</code>
                                         </td>
                                         <td>
-                                            <span class="badge bg-{{ record.risk_color }} risk-score">
-                                                {{ record.risk_percentage }}%
+                                            <span class="badge bg-{{ txn.risk_color }} risk-score">
+                                                {{ txn.risk_percentage }}%
                                             </span>
                                         </td>
                                         <td>
-                                            <span class="action-icon">{{ record.action_icon }}</span>
-                                            <span class="text-capitalize">{{ record.action }}</span>
+                                            {% if txn.risk_level == 'high' %}
+                                                🚨 High Risk
+                                            {% elif txn.risk_level == 'medium' %}
+                                                ⚠️ Medium Risk
+                                            {% elif txn.risk_level == 'low' %}
+                                                ⚡ Low Risk
+                                            {% else %}
+                                                ✅ Normal
+                                            {% endif %}
                                         </td>
                                         <td class="explanation-cell">
-                                            {{ record.explanation }}
+                                            <strong>${{ "%.2f"|format(txn.amount) }}</strong> at {{ txn.merchant }}
+                                            {% if txn.risk_level == 'high' %}
+                                                <br><small class="text-danger">High-risk transaction detected</small>
+                                            {% elif txn.risk_level == 'medium' %}
+                                                <br><small class="text-warning">Unusual transaction pattern</small>
+                                            {% else %}
+                                                <br><small class="text-success">Normal transaction</small>
+                                            {% endif %}
                                         </td>
                                     </tr>
                                     {% endfor %}
                                 </tbody>
                             </table>
-                            
-                            {% if not records %}
+
+                            {% if not transactions %}
                             <div class="text-center py-4">
                                 <p class="text-muted">No transactions to display</p>
                             </div>

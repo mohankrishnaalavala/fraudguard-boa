@@ -125,41 +125,73 @@ async def get_boa_transactions() -> List[Dict]:
 
 async def forward_to_fraudguard(transaction: Dict) -> bool:
     """Forward transaction to FraudGuard for AI analysis"""
+    transaction_id = transaction.get("transactionId", f"boa_{int(time.time())}")
+
     try:
         # Convert BoA transaction format to FraudGuard format
         fraudguard_transaction = {
-            "transaction_id": transaction.get("transactionId", f"boa_{int(time.time())}"),
+            "transaction_id": transaction_id,
             "amount": abs(float(transaction.get("amount", 0))),  # Use absolute value
             "merchant": transaction.get("description", "Unknown Merchant"),
             "user_id": transaction.get("accountId", "unknown_user"),
             "timestamp": transaction.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "source": "bank_of_anthos"
         }
-        
+
+        logger.info("forwarding_transaction_to_fraudguard",
+                   transaction_id=transaction_id,
+                   amount=fraudguard_transaction["amount"],
+                   merchant=fraudguard_transaction["merchant"],
+                   url=f"{MCP_GATEWAY_URL}/api/transactions")
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 f"{MCP_GATEWAY_URL}/api/transactions",
                 json=fraudguard_transaction,
                 headers={"Content-Type": "application/json"}
             )
-            
+
+            logger.info("mcp_gateway_response",
+                       transaction_id=transaction_id,
+                       status_code=response.status_code,
+                       response_headers=dict(response.headers))
+
             if response.status_code in [200, 201, 202]:
                 logger.info("transaction_forwarded_to_fraudguard",
-                           transaction_id=fraudguard_transaction["transaction_id"],
+                           transaction_id=transaction_id,
                            amount=fraudguard_transaction["amount"],
-                           merchant=fraudguard_transaction["merchant"])
+                           merchant=fraudguard_transaction["merchant"],
+                           response_text=response.text)
                 return True
             else:
                 logger.warning("failed_to_forward_transaction",
-                              transaction_id=fraudguard_transaction["transaction_id"],
+                              transaction_id=transaction_id,
                               status_code=response.status_code,
-                              response=response.text)
+                              response=response.text,
+                              url=f"{MCP_GATEWAY_URL}/api/transactions")
                 return False
-                
+
+    except httpx.TimeoutException as e:
+        logger.error("mcp_gateway_timeout",
+                    transaction_id=transaction_id,
+                    url=f"{MCP_GATEWAY_URL}/api/transactions",
+                    timeout=15.0,
+                    error=str(e))
+        return False
+    except httpx.HTTPStatusError as e:
+        logger.error("mcp_gateway_http_error",
+                    transaction_id=transaction_id,
+                    status_code=e.response.status_code,
+                    response_text=e.response.text,
+                    url=f"{MCP_GATEWAY_URL}/api/transactions",
+                    error=str(e))
+        return False
     except Exception as e:
         logger.error("error_forwarding_transaction",
-                    transaction_id=transaction.get("transactionId"),
-                    error=str(e))
+                    transaction_id=transaction_id,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                    url=f"{MCP_GATEWAY_URL}/api/transactions")
         return False
 
 async def monitor_boa_transactions():
