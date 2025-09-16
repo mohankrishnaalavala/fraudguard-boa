@@ -102,6 +102,25 @@ networkPolicy:
       ports:
         - protocol: TCP
           port: 8080
+    # Explicitly allow access to service ClusterIPs (some CNIs evaluate egress before kube-proxy NAT)
+    - to:
+        - ipBlock:
+            cidr: 34.118.232.191/32  # userservice ClusterIP
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 34.118.226.188/32  # transactionhistory ClusterIP
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 34.118.234.82/32   # mcp-gateway ClusterIP (defensive)
+      ports:
+        - protocol: TCP
+          port: 8080
     # Allow DNS resolution
     - to:
         - namespaceSelector:
