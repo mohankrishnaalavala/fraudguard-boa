@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 import httpx
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import structlog
 
 # Configure structured logging
@@ -38,6 +38,7 @@ PORT = int(os.getenv("PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
 MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.svc.cluster.local:8080")
 EXPLAIN_AGENT_URL = os.getenv("EXPLAIN_AGENT_URL", "http://explain-agent.fraudguard.svc.cluster.local:8080")
+ACTION_ORCHESTRATOR_URL = os.getenv("ACTION_ORCHESTRATOR_URL", "http://action-orchestrator.fraudguard.svc.cluster.local:8080")
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "10"))
 
 # Set log level
@@ -259,6 +260,37 @@ async def api_stats():
     except Exception as e:
         logger.error("api_stats_failed", error=str(e))
         return jsonify({"error": "Failed to fetch stats"}), 500
+
+@app.route("/api/notify", methods=["POST"])
+async def api_notify():
+    """Trigger a user notification via action-orchestrator for a given transaction."""
+    try:
+        payload = request.get_json(force=True) or {}
+        transaction_id = payload.get("transaction_id")
+        risk_score = float(payload.get("risk_score", 0))
+        explanation = payload.get("explanation", "Suspicious activity detected")
+        if not transaction_id:
+            return jsonify({"error": "transaction_id is required"}), 400
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{ACTION_ORCHESTRATOR_URL}/execute",
+                json={
+                    "transaction_id": transaction_id,
+                    "risk_score": risk_score,
+                    "action": "notify",
+                    "explanation": explanation
+                }
+            )
+            resp.raise_for_status()
+            return jsonify(resp.json())
+
+    except httpx.HTTPError as e:
+        logger.error("notify_action_http_error", error=str(e))
+        return jsonify({"error": "Failed to trigger notify action"}), 502
+    except Exception as e:
+        logger.error("notify_action_failed", error=str(e))
+        return jsonify({"error": "Internal error"}), 500
 
 if __name__ == "__main__":
     logger.info("starting_dashboard", port=PORT, explain_agent_url=EXPLAIN_AGENT_URL)

@@ -2,7 +2,7 @@ nameOverride: risk-scorer
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/risk-scorer
-  tag: intelligent
+  tag: latest
   pullPolicy: Always
 
 replicaCount: 1
@@ -19,11 +19,15 @@ container:
     - name: GEMINI_MODEL
       value: "gemini-1.5-flash"
     - name: GEMINI_PROJECT_ID
-      value: "PROJECT_ID"
+      value: "fraudguard-hackathon"
     - name: GEMINI_LOCATION
       value: "us-central1"
     - name: EXPLAIN_AGENT_URL
       value: "http://explain-agent.fraudguard.svc.cluster.local:8080"
+    - name: USE_VERTEX_AI
+      value: "true"
+    - name: MCP_GATEWAY_URL
+      value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
 
 resources:
   requests:
@@ -54,7 +58,7 @@ serviceAccount:
   create: true
   name: ""
   annotations:
-    iam.gke.io/gcp-service-account: risk-scorer@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: risk-scorer@fraudguard-hackathon.iam.gserviceaccount.com
 
 networkPolicy:
   enabled: true

@@ -41,6 +41,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "PLACEHOLDER_GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_PROJECT_ID = os.getenv("GEMINI_PROJECT_ID", "PROJECT_ID")
 GEMINI_LOCATION = os.getenv("GEMINI_LOCATION", "us-central1")
+USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "true").lower() == "true"
+MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.svc.cluster.local:8080")
 EXPLAIN_AGENT_URL = os.getenv("EXPLAIN_AGENT_URL", "http://explain-agent.fraudguard.svc.cluster.local:8080")
 
 # Set log level
@@ -99,7 +101,104 @@ Response format:
     "rationale": "Brief explanation of risk factors"
 }}
 """
-    return prompt
+
+async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]:
+    """Retrieve recent transactions for the account from MCP Gateway for RAG."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{MCP_GATEWAY_URL}/accounts/{account_id}/transactions", params={"limit": limit})
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        logger.warning("history_fetch_failed", account_id=account_id, error=str(e))
+    return []
+
+def summarize_history_for_rag(history: list[dict]) -> dict:
+    """Summarize history into compact stats: known recipients, typical amounts, time windows."""
+    from collections import defaultdict
+    import statistics
+    recipients = defaultdict(list)
+    hours = []
+    amounts = []
+    for tx in history:
+        merchant = (tx.get("merchant") or "").lower()
+        amounts.append(float(tx.get("amount", 0)))
+        ts = tx.get("timestamp") or ""
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            hours.append(dt.hour)
+        except Exception:
+            pass
+        if merchant.startswith("acct:"):
+            recipients[merchant].append(float(tx.get("amount", 0)))
+    top_known = []
+    for m, vals in recipients.items():
+        try:
+            typical = statistics.median(vals)
+        except statistics.StatisticsError:
+            typical = vals[0] if vals else 0
+        top_known.append({"recipient": m, "count": len(vals), "typical_amount": round(typical, 2)})
+    top_known.sort(key=lambda x: x["count"], reverse=True)
+    typical_amount = round(statistics.median(amounts), 2) if amounts else 0
+    common_hours = []
+    if hours:
+        from collections import Counter
+        common_hours = [h for h, _ in Counter(hours).most_common(3)]
+    return {
+        "known_recipients": top_known[:5],
+        "typical_amount": typical_amount,
+        "common_hours": common_hours,
+        "history_count": len(history)
+    }
+
+def build_vertex_prompt(transaction: dict, rag_summary: dict) -> str:
+    """Construct a Vertex AI prompt with structured context from RAG summary."""
+    return (
+        "You are an AI fraud analyst. Analyze the transaction with context. "
+        "Return strict JSON with keys: risk_score (0.0-1.0), rationale (short).\n"
+        f"Transaction: {json.dumps(transaction, default=str)}\n"
+        f"Context: {json.dumps(rag_summary, default=str)}\n"
+        "Guidelines:\n"
+        "- Flag new/unknown recipients above $500 as higher risk.\n"
+        "- If recipient is known with typical high amount (e.g., $1500), lower risk.\n"
+        "- Consider unusual time (02:00-04:00) and deviation from typical amounts.\n"
+        "- Consider recent frequency bursts. Keep rationale concise."
+    )
+
+async def call_vertex_ai(prompt: str) -> dict:
+    """Call Vertex AI Generative API (Gemini) using ADC. Fallback to mock on error."""
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        credentials.refresh(Request())
+        token = credentials.token
+        url = (
+            f"https://{GEMINI_LOCATION}-aiplatform.googleapis.com/v1/"
+            f"projects/{GEMINI_PROJECT_ID}/locations/{GEMINI_LOCATION}/publishers/google/models/{GEMINI_MODEL}:generateContent"
+        )
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 256}
+        }
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            # Extract first text part
+            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            try:
+                return json.loads(text)
+            except Exception:
+                # Attempt to extract JSON substring
+                import re
+                m = re.search(r"\{[\s\S]*\}", text)
+                return json.loads(m.group(0)) if m else {"risk_score": 0.5, "rationale": "Unparsable AI output"}
+    except Exception as e:
+        logger.error("vertex_ai_error", error=str(e))
+        return {"risk_score": 0.5, "rationale": "Vertex AI error - fallback used"}
+
+    return {"risk_score": 0.5, "rationale": "No AI response - default applied"}
 
 async def call_gemini_api(prompt: str) -> dict:
     """Call Gemini API for risk analysis"""
@@ -224,7 +323,7 @@ async def send_to_explain_agent(risk_result: RiskScore):
 
 @app.post("/analyze", response_model=RiskScore)
 async def analyze_transaction(transaction: Transaction):
-    """Analyze transaction risk using Gemini"""
+    """Analyze transaction risk using Vertex AI with RAG (fallback to mock)."""
     try:
         logger.info(
             "risk_analysis_started",
@@ -233,17 +332,40 @@ async def analyze_transaction(transaction: Transaction):
             category=transaction.category
         )
 
-        # Create privacy-safe prompt
-        prompt = create_risk_analysis_prompt(transaction)
+        # RAG: fetch and summarize account history
+        history = await fetch_account_history(transaction.account_id, limit=100)
+        rag_summary = summarize_history_for_rag(history)
 
-        # Call Gemini API
-        gemini_result = await call_gemini_api(prompt)
+        # Build Vertex prompt with RAG context
+        tx_payload = {
+            "transaction_id": transaction.transaction_id,
+            "account_id": transaction.account_id,
+            "amount": transaction.amount,
+            "merchant": transaction.merchant,
+            "category": transaction.category,
+            "timestamp": transaction.timestamp.isoformat(),
+            "location": transaction.location,
+        }
+        prompt = build_vertex_prompt(tx_payload, rag_summary)
+
+        # Prefer Vertex AI call when enabled and configured
+        if USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID":
+            ai_result = await call_vertex_ai(prompt)
+        else:
+            # Fallback to local mock Gemini logic
+            # Reuse the older prompt generator for compatibility
+            legacy_prompt = create_risk_analysis_prompt(transaction)
+            ai_result = await call_gemini_api(legacy_prompt)
+
+        # Normalize result
+        score_val = float(ai_result.get("risk_score", 0.5))
+        rationale_val = ai_result.get("rationale", "No rationale provided")
 
         # Create risk score response
         risk_score = RiskScore(
             transaction_id=transaction.transaction_id,
-            risk_score=gemini_result["risk_score"],
-            rationale=gemini_result["rationale"],
+            risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+            rationale=rationale_val,
             timestamp=datetime.utcnow()
         )
 
