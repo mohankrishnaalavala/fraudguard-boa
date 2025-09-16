@@ -75,3 +75,43 @@ autoscaling:
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
+
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Allow egress to MCP Gateway in fraudguard namespace (port 8080)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: fraudguard
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: mcp-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow egress to Bank of Anthos services (userservice, transactionhistory) on port 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: boa
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
