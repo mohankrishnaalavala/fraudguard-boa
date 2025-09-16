@@ -81,12 +81,12 @@ async def execute_notify_action(transaction_id: str, explanation: str) -> Dict[s
             explanation=explanation,
             action="notify"
         )
-        
+
         return {
             "success": True,
             "message": f"Notification sent for transaction {transaction_id}"
         }
-        
+
     except Exception as e:
         logger.error("notify_action_failed", transaction_id=transaction_id, error=str(e))
         return {
@@ -105,7 +105,7 @@ async def execute_stepup_action(transaction_id: str, explanation: str) -> Dict[s
             explanation=explanation,
             action="step-up"
         )
-        
+
         # Simulate API call to BoA
         # async with httpx.AsyncClient() as client:
         #     response = await client.post(
@@ -114,12 +114,12 @@ async def execute_stepup_action(transaction_id: str, explanation: str) -> Dict[s
         #         timeout=10.0
         #     )
         #     response.raise_for_status()
-        
+
         return {
             "success": True,
             "message": f"Step-up authentication triggered for transaction {transaction_id}"
         }
-        
+
     except Exception as e:
         logger.error("stepup_action_failed", transaction_id=transaction_id, error=str(e))
         return {
@@ -138,7 +138,7 @@ async def execute_hold_action(transaction_id: str, explanation: str) -> Dict[str
             explanation=explanation,
             action="hold"
         )
-        
+
         # Simulate API call to BoA
         # async with httpx.AsyncClient() as client:
         #     response = await client.post(
@@ -147,12 +147,12 @@ async def execute_hold_action(transaction_id: str, explanation: str) -> Dict[str
         #         timeout=10.0
         #     )
         #     response.raise_for_status()
-        
+
         return {
             "success": True,
             "message": f"Transaction {transaction_id} placed on hold"
         }
-        
+
     except Exception as e:
         logger.error("hold_action_failed", transaction_id=transaction_id, error=str(e))
         return {
@@ -169,12 +169,12 @@ async def execute_allow_action(transaction_id: str, explanation: str) -> Dict[st
             explanation=explanation,
             action="allow"
         )
-        
+
         return {
             "success": True,
             "message": f"Transaction {transaction_id} allowed to proceed"
         }
-        
+
     except Exception as e:
         logger.error("allow_action_failed", transaction_id=transaction_id, error=str(e))
         return {
@@ -192,7 +192,7 @@ async def execute_action(request: ActionRequest):
             action=request.action,
             risk_score=request.risk_score
         )
-        
+
         # Execute the appropriate action
         if request.action == "notify":
             result = await execute_notify_action(request.transaction_id, request.explanation)
@@ -205,7 +205,7 @@ async def execute_action(request: ActionRequest):
         else:
             logger.error("unknown_action", action=request.action, transaction_id=request.transaction_id)
             raise HTTPException(status_code=400, detail=f"Unknown action: {request.action}")
-        
+
         # Create action result
         action_result = ActionResult(
             transaction_id=request.transaction_id,
@@ -214,16 +214,16 @@ async def execute_action(request: ActionRequest):
             message=result["message"],
             timestamp=datetime.utcnow()
         )
-        
+
         logger.info(
             "action_execution_completed",
             transaction_id=request.transaction_id,
             action=request.action,
             success=result["success"]
         )
-        
+
         return action_result
-        
+
     except HTTPException:
         raise
     except Exception as e:

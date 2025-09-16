@@ -11,9 +11,10 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code and templates
 COPY app.py .
 COPY templates/ templates/
+# Note: Dynamic dashboard with real transaction data
 
 # Create necessary directories for read-only filesystem
 RUN mkdir -p /tmp /var/run && \

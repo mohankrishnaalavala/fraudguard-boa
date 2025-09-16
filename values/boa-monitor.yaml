@@ -1,0 +1,149 @@
+name: boa-monitor
+namespace: fraudguard
+
+image:
+  repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/boa-monitor
+  tag: latest
+  pullPolicy: Always
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+container:
+  port: 8080
+  env:
+    - name: MCP_GATEWAY_URL
+      value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
+    - name: POLL_INTERVAL
+      value: "10"
+    - name: LOG_LEVEL
+      value: "INFO"
+    - name: BOA_USERSERVICE_URL
+      value: "http://userservice.boa.svc.cluster.local:8080"
+    - name: BOA_HISTORY_URL
+      value: "http://transactionhistory.boa.svc.cluster.local:8080"
+  envFrom:
+    - name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+podSecurityContext:
+  fsGroup: 1000
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Allow egress to MCP Gateway in fraudguard namespace (port 8080)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: fraudguard
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: mcp-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow egress to Bank of Anthos services (userservice, transactionhistory) on port 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: boa
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Explicitly allow access to service ClusterIPs (some CNIs evaluate egress before kube-proxy NAT)
+    - to:
+        - ipBlock:
+            cidr: 34.118.232.191/32  # userservice ClusterIP
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 34.118.226.188/32  # transactionhistory ClusterIP
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 34.118.234.82/32   # mcp-gateway ClusterIP (defensive)
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 34.118.224.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

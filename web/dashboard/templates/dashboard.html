@@ -105,33 +105,47 @@
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {% for record in records %}
+                                    {% for txn in transactions %}
                                     <tr>
                                         <td>
-                                            <div>{{ record.formatted_time }}</div>
-                                            <small class="text-muted">{{ record.formatted_date }}</small>
+                                            <div>{{ txn.formatted_time or 'Unknown' }}</div>
+                                            <small class="text-muted">{{ txn.formatted_date or 'Unknown' }}</small>
                                         </td>
                                         <td>
-                                            <code>{{ record.transaction_id }}</code>
+                                            <code>{{ txn.transaction_id }}</code>
                                         </td>
                                         <td>
-                                            <span class="badge bg-{{ record.risk_color }} risk-score">
-                                                {{ record.risk_percentage }}%
+                                            <span class="badge bg-{{ txn.risk_color }} risk-score">
+                                                {{ txn.risk_percentage }}%
                                             </span>
                                         </td>
                                         <td>
-                                            <span class="action-icon">{{ record.action_icon }}</span>
-                                            <span class="text-capitalize">{{ record.action }}</span>
+                                            {% if txn.risk_level == 'high' %}
+                                                🚨 High Risk
+                                            {% elif txn.risk_level == 'medium' %}
+                                                ⚠️ Medium Risk
+                                            {% elif txn.risk_level == 'low' %}
+                                                ⚡ Low Risk
+                                            {% else %}
+                                                ✅ Normal
+                                            {% endif %}
                                         </td>
                                         <td class="explanation-cell">
-                                            {{ record.explanation }}
+                                            <strong>${{ "%.2f"|format(txn.amount) }}</strong> at {{ txn.merchant }}
+                                            {% if txn.risk_level == 'high' %}
+                                                <br><small class="text-danger">High-risk transaction detected</small>
+                                            {% elif txn.risk_level == 'medium' %}
+                                                <br><small class="text-warning">Unusual transaction pattern</small>
+                                            {% else %}
+                                                <br><small class="text-success">Normal transaction</small>
+                                            {% endif %}
                                         </td>
                                     </tr>
                                     {% endfor %}
                                 </tbody>
                             </table>
-                            
-                            {% if not records %}
+
+                            {% if not transactions %}
                             <div class="text-center py-4">
                                 <p class="text-muted">No transactions to display</p>
                             </div>
@@ -146,7 +160,7 @@
         <div class="row mt-4 mb-3">
             <div class="col text-center">
                 <small class="text-muted">
-                    Last updated: <span id="last-updated">{{ moment().format('YYYY-MM-DD HH:mm:ss') }}</span>
+                    Last updated: <span id="last-updated">{{ current_time }}</span>
                 </small>
             </div>
         </div>
@@ -154,26 +168,10 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Auto-refresh functionality
-        let refreshInterval = {{ refresh_interval }};
-        let countdown = refreshInterval / 1000;
-        
-        function updateRefreshIndicator() {
-            document.getElementById('refresh-indicator').textContent = 
-                `Auto-refresh: ${countdown}s`;
-            countdown--;
-            
-            if (countdown < 0) {
-                location.reload();
-            }
-        }
-        
-        // Update countdown every second
-        setInterval(updateRefreshIndicator, 1000);
-        
-        // Update last updated timestamp
-        document.getElementById('last-updated').textContent = 
-            new Date().toLocaleString();
+        // Simple auto-refresh functionality
+        setTimeout(function() {
+            window.location.reload();
+        }, {{ refresh_interval }});
     </script>
 </body>
 </html>

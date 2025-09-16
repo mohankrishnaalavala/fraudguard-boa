@@ -1,0 +1,217 @@
+name: PR Review Bot
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  automated-review:
+    name: Automated PR Review
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff black pytest pytest-asyncio
+
+    - name: Run code quality checks
+      id: quality_check
+      run: |
+        echo "## 🔍 Code Quality Report" > quality_report.md
+        echo "" >> quality_report.md
+        
+        # Ruff linting
+        echo "### 📋 Linting Results (ruff)" >> quality_report.md
+        if ruff check services/ web/ --fix --output-format=github; then
+          echo "✅ No linting issues found" >> quality_report.md
+        else
+          echo "⚠️ Linting issues found and auto-fixed where possible." >> quality_report.md
+        fi
+        echo "" >> quality_report.md
+        
+        # Black formatting
+        echo "### 🎨 Code Formatting (black)" >> quality_report.md
+        if black --check services/ web/; then
+          echo "✅ Code formatting is correct" >> quality_report.md
+        else
+          echo "⚠️ Code formatting issues detected. Auto-formatting applied." >> quality_report.md
+          black services/ web/ || true
+        fi
+        echo "" >> quality_report.md
+
+    - name: Security scan
+      id: security_scan
+      run: |
+        echo "### 🔒 Security Scan Results" >> quality_report.md
+
+        # Check for common security issues, excluding legitimate risk analysis keywords
+        if grep -r "password\|secret\|key" --include="*.py" --include="*.yaml" --include="*.yml" services/ web/ | \
+           grep -v "# nosec" | \
+           grep -v "test_" | \
+           grep -v "suspicious_keywords" | \
+           grep -v "risk_patterns" | \
+           grep -v "keyword in merchant" | \
+           grep -v "High-risk merchant" | \
+           grep -v "keyword.*merchant" | \
+           head -5; then
+          echo "⚠️ Potential secrets detected in code. Please review:" >> quality_report.md
+          echo "\`\`\`" >> quality_report.md
+          grep -r "password\|secret\|key" --include="*.py" --include="*.yaml" --include="*.yml" services/ web/ | \
+            grep -v "# nosec" | \
+            grep -v "test_" | \
+            grep -v "suspicious_keywords" | \
+            grep -v "risk_patterns" | \
+            grep -v "keyword in merchant" | \
+            grep -v "High-risk merchant" | \
+            grep -v "keyword.*merchant" | \
+            head -5 >> quality_report.md
+          echo "\`\`\`" >> quality_report.md
+          echo "security_issues=true" >> $GITHUB_OUTPUT
+        else
+          echo "✅ No obvious security issues detected" >> quality_report.md
+        fi
+        echo "" >> quality_report.md
+
+    - name: Check for required files
+      id: file_check
+      run: |
+        echo "### 📁 Required Files Check" >> quality_report.md
+        
+        missing_files=""
+        
+        # Check for Dockerfiles
+        for service in services/*/; do
+          if [ ! -f "$service/Dockerfile" ]; then
+            missing_files="$missing_files\n- Missing Dockerfile in $service"
+          fi
+        done
+        
+        # Check for requirements.txt
+        for service in services/*/; do
+          if [ ! -f "$service/requirements.txt" ]; then
+            missing_files="$missing_files\n- Missing requirements.txt in $service"
+          fi
+        done
+        
+        if [ -n "$missing_files" ]; then
+          echo "❌ Missing required files:" >> quality_report.md
+          echo -e "$missing_files" >> quality_report.md
+          echo "file_issues=true" >> $GITHUB_OUTPUT
+        else
+          echo "✅ All required files present" >> quality_report.md
+        fi
+        echo "" >> quality_report.md
+
+    - name: Check Helm values
+      id: helm_check
+      run: |
+        echo "### ⚙️ Helm Configuration Check" >> quality_report.md
+        
+        helm_issues=""
+        
+        # Check if all services have corresponding Helm values
+        for service in services/*/; do
+          service_name=$(basename "$service")
+          if [ ! -f "values/$service_name.yaml" ]; then
+            helm_issues="$helm_issues\n- Missing Helm values for $service_name"
+          fi
+        done
+        
+        if [ -n "$helm_issues" ]; then
+          echo "❌ Helm configuration issues:" >> quality_report.md
+          echo -e "$helm_issues" >> quality_report.md
+          echo "helm_issues=true" >> $GITHUB_OUTPUT
+        else
+          echo "✅ Helm configuration looks good" >> quality_report.md
+        fi
+        echo "" >> quality_report.md
+
+    - name: Generate summary
+      run: |
+        echo "### 📊 Summary" >> quality_report.md
+        
+        if [ "${{ steps.quality_check.outputs.quality_issues }}" = "true" ] || \
+           [ "${{ steps.security_scan.outputs.security_issues }}" = "true" ] || \
+           [ "${{ steps.file_check.outputs.file_issues }}" = "true" ] || \
+           [ "${{ steps.helm_check.outputs.helm_issues }}" = "true" ]; then
+          echo "❌ **This PR has issues that should be addressed before merging.**" >> quality_report.md
+          echo "" >> quality_report.md
+          echo "Please fix the issues above and push new commits to update this review." >> quality_report.md
+        else
+          echo "✅ **This PR looks good and is ready for human review!**" >> quality_report.md
+          echo "" >> quality_report.md
+          echo "All automated checks passed. A human reviewer can now approve and merge." >> quality_report.md
+        fi
+        
+        echo "" >> quality_report.md
+        echo "---" >> quality_report.md
+        echo "*This review was automatically generated by the FraudGuard PR Review Bot*" >> quality_report.md
+
+    - name: Comment on PR
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('quality_report.md', 'utf8');
+          
+          // Find existing bot comment
+          const comments = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.data.find(comment => 
+            comment.user.type === 'Bot' && 
+            comment.body.includes('Code Quality Report')
+          );
+          
+          if (botComment) {
+            // Update existing comment
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: report
+            });
+          } else {
+            // Create new comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
+            });
+          }
+
+    - name: Set PR status
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const hasIssues = 
+            '${{ steps.quality_check.outputs.quality_issues }}' === 'true' ||
+            '${{ steps.security_scan.outputs.security_issues }}' === 'true' ||
+            '${{ steps.file_check.outputs.file_issues }}' === 'true' ||
+            '${{ steps.helm_check.outputs.helm_issues }}' === 'true';
+          
+          if (hasIssues) {
+            core.setFailed('PR has quality issues that need to be addressed');
+          } else {
+            console.log('PR passed all automated checks');
+          }

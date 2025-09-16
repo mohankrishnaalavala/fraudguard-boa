@@ -39,6 +39,13 @@ spec:
             - name: {{ .name }}
               value: {{ .value | quote }}
             {{- end }}
+          {{- if .Values.container.envFrom }}
+          envFrom:
+            {{- range .Values.container.envFrom }}
+            - secretRef:
+                name: {{ .name }}
+            {{- end }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:

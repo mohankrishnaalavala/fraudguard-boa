@@ -1,0 +1,183 @@
+name: 🚀 Deploy FraudGuard
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'hackathon'
+        type: choice
+        options:
+          - hackathon
+          - staging
+          - production
+      force_rebuild:
+        description: 'Force rebuild all images'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  PROJECT_ID: fraudguard-hackathon
+  REGION: us-central1
+  CLUSTER_NAME: fraudguard-auto
+  NAMESPACE: fraudguard
+  REGISTRY: us-docker.pkg.dev/fraudguard-hackathon/fraudguard
+
+jobs:
+  deploy:
+    name: 🚀 Build & Deploy FraudGuard
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: 🔐 Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          
+      - name: 🛠️ Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          
+      - name: 🔧 Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }}
+        
+      - name: 🏗️ Build and Push All Images
+        run: |
+          echo "🏗️ Building all FraudGuard services..."
+          
+          # Build all services
+          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "boa-monitor")
+
+          for service in "${services[@]}"; do
+            echo "🔨 Building $service..."
+            docker build -t ${{ env.REGISTRY }}/$service:${{ github.sha }} services/$service/
+            docker push ${{ env.REGISTRY }}/$service:${{ github.sha }}
+
+            # Also tag as latest for this environment
+            docker tag ${{ env.REGISTRY }}/$service:${{ github.sha }} ${{ env.REGISTRY }}/$service:${{ inputs.environment }}
+            docker push ${{ env.REGISTRY }}/$service:${{ inputs.environment }}
+          done
+          
+          # Build dashboard
+          echo "🔨 Building dashboard..."
+          docker build -t ${{ env.REGISTRY }}/dashboard:${{ github.sha }} web/dashboard/
+          docker push ${{ env.REGISTRY }}/dashboard:${{ github.sha }}
+          
+          docker tag ${{ env.REGISTRY }}/dashboard:${{ github.sha }} ${{ env.REGISTRY }}/dashboard:${{ inputs.environment }}
+          docker push ${{ env.REGISTRY }}/dashboard:${{ inputs.environment }}
+          
+      - name: 🎯 Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ env.CLUSTER_NAME }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }}
+            
+      - name: 📦 Deploy to Kubernetes
+        run: |
+          echo "🚀 Deploying FraudGuard to Kubernetes..."
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Update image tags in values files
+          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
+
+          for service in "${services[@]}"; do
+            echo "📦 Deploying $service..."
+
+            # Update the image tag in values file
+            sed -i "s|tag:.*|tag: ${{ inputs.environment }}|g" values/$service.yaml
+
+            # Deploy using Helm
+            helm upgrade --install $service ./helm/workload \
+              -f values/$service.yaml \
+              -n ${{ env.NAMESPACE }} \
+              --wait --timeout=300s
+          done
+
+          # Deploy external LoadBalancer services for IP access
+          echo "🌐 Deploying external LoadBalancer services..."
+          kubectl apply -f k8s/external-services.yaml
+          
+      - name: ✅ Verify Deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          
+          # Wait for all pods to be ready
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=mcp-gateway -n ${{ env.NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=dashboard -n ${{ env.NAMESPACE }} --timeout=300s
+          
+          # Check pod status
+          echo "📊 Pod Status:"
+          kubectl get pods -n ${{ env.NAMESPACE }}
+          
+          # Check service status
+          echo "🌐 Service Status:"
+          kubectl get svc -n ${{ env.NAMESPACE }}
+
+          # Check external LoadBalancer IPs
+          echo "🌍 External LoadBalancer Services:"
+          kubectl get svc -n ${{ env.NAMESPACE }} -l service=external-access
+          kubectl get svc -n boa -l service=external-access
+          
+      - name: 🧪 Health Check
+        run: |
+          echo "🏥 Running health checks..."
+          
+          # Port forward for health checks
+          kubectl port-forward -n ${{ env.NAMESPACE }} svc/dashboard 8080:8080 &
+          kubectl port-forward -n ${{ env.NAMESPACE }} svc/mcp-gateway 8082:8080 &
+          
+          sleep 10
+          
+          # Test dashboard health
+          if curl -f http://localhost:8080/healthz; then
+            echo "✅ Dashboard health check passed"
+          else
+            echo "❌ Dashboard health check failed"
+            exit 1
+          fi
+          
+          # Test MCP Gateway health
+          if curl -f http://localhost:8082/healthz; then
+            echo "✅ MCP Gateway health check passed"
+          else
+            echo "❌ MCP Gateway health check failed"
+            exit 1
+          fi
+          
+      - name: 📝 Deployment Summary
+        run: |
+          echo "🎉 FraudGuard Deployment Complete!"
+          echo ""
+          echo "📊 Deployment Details:"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Namespace: ${{ env.NAMESPACE }}"
+          echo ""
+          echo "🌐 Access URLs (via port-forward):"
+          echo "Dashboard: kubectl port-forward -n ${{ env.NAMESPACE }} svc/dashboard 8080:8080"
+          echo "MCP Gateway: kubectl port-forward -n ${{ env.NAMESPACE }} svc/mcp-gateway 8082:8080"
+          echo "Bank of Anthos: kubectl port-forward -n boa svc/frontend 8081:80"
+          echo ""
+          echo "🔗 External IP Access:"
+          echo "Get external IPs with: kubectl get svc -l service=external-access --all-namespaces"
+          echo ""
+          echo "📱 Access via External IPs:"
+          echo "FraudGuard Dashboard: http://[EXTERNAL-IP]/"
+          echo "FraudGuard API: http://[API-EXTERNAL-IP]/api/"
+          echo "Bank of Anthos: http://[BOA-EXTERNAL-IP]/"
+          echo ""
+          echo "🔗 Domain URLs (if configured):"
+          echo "FraudGuard: https://fraudguard.mohankrishna.site"
+          echo "Bank of Anthos: https://boa.mohankrishna.site"

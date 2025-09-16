@@ -18,6 +18,9 @@ container:
   # Example:
   # - name: LOG_LEVEL
   #   value: "info"
+  envFrom: []
+  # Example to mount a Kubernetes Secret as environment variables (all keys become env vars):
+  # - name: my-app-secrets
 
 service:
   type: ClusterIP

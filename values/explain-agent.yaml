@@ -15,7 +15,7 @@ container:
     - name: LOG_LEVEL
       value: "info"
     - name: DATABASE_URL
-      value: "sqlite:///tmp/audit.db"
+      value: "sqlite:////var/run/audit.db"
     - name: ACTION_ORCHESTRATOR_URL
       value: "http://action-orchestrator.fraudguard.svc.cluster.local:8080"
 
