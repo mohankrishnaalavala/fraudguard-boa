@@ -112,3 +112,11 @@ networkPolicy:
           port: 53
         - protocol: TCP
           port: 53
+    - to:
+        - ipBlock:
+            cidr: 34.118.224.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
