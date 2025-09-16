@@ -187,13 +187,21 @@ async def call_vertex_ai(prompt: str) -> dict:
             data = resp.json()
             # Extract first text part
             text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            result = None
             try:
-                return json.loads(text)
+                result = json.loads(text)
             except Exception:
                 # Attempt to extract JSON substring
                 import re
                 m = re.search(r"\{[\s\S]*\}", text)
-                return json.loads(m.group(0)) if m else {"risk_score": 0.5, "rationale": "Unparsable AI output"}
+                result = json.loads(m.group(0)) if m else {"risk_score": 0.5, "rationale": "Unparsable AI output"}
+            # Temporary debug (no PII): log parse success and output presence (no content)
+            logger.info(
+                "vertex_ai_call_success",
+                parsed=bool(isinstance(result, dict) and "risk_score" in result and "rationale" in result),
+                text_len=(len(text) if isinstance(text, str) else 0),
+            )
+            return result
     except Exception as e:
         logger.error("vertex_ai_error", error=str(e))
         return {"risk_score": 0.5, "rationale": "Vertex AI error - fallback used"}
@@ -348,6 +356,16 @@ async def analyze_transaction(transaction: Transaction):
         }
         prompt = build_vertex_prompt(tx_payload, rag_summary)
 
+        # Temporary debug (no PII): log invocation mode and RAG size
+        logger.info(
+            "ai_invoke",
+            transaction_id=transaction.transaction_id,
+            use_vertex=bool(USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID"),
+            project=GEMINI_PROJECT_ID,
+            location=GEMINI_LOCATION,
+            rag_history_count=int(rag_summary.get("history_count", 0)),
+        )
+
         # Prefer Vertex AI call when enabled and configured
         if USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID":
             ai_result = await call_vertex_ai(prompt)
@@ -356,6 +374,15 @@ async def analyze_transaction(transaction: Transaction):
             # Reuse the older prompt generator for compatibility
             legacy_prompt = create_risk_analysis_prompt(transaction)
             ai_result = await call_gemini_api(legacy_prompt)
+
+        # Temporary debug (no PII): log source and a short rationale preview
+        logger.info(
+            "ai_result_received",
+            transaction_id=transaction.transaction_id,
+            source=("vertex" if (USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID") else "fallback"),
+            risk_score=float(ai_result.get("risk_score", 0.5)),
+            rationale_preview=(str(ai_result.get("rationale", ""))[:80]),
+        )
 
         # Normalize result
         score_val = float(ai_result.get("risk_score", 0.5))
