@@ -21,17 +21,21 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-env:
-  - name: BOA_LEDGER_URL
-    value: "http://ledgerwriter.boa.svc.cluster.local:8080"
-  - name: BOA_ACCOUNTS_URL
-    value: "http://accounts-db.boa.svc.cluster.local:5432"
-  - name: MCP_GATEWAY_URL
-    value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
-  - name: POLL_INTERVAL
-    value: "10"
-  - name: LOG_LEVEL
-    value: "INFO"
+container:
+  port: 8080
+  env:
+    - name: MCP_GATEWAY_URL
+      value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
+    - name: POLL_INTERVAL
+      value: "10"
+    - name: LOG_LEVEL
+      value: "INFO"
+    - name: BOA_USERSERVICE_URL
+      value: "http://userservice.boa.svc.cluster.local:8080"
+    - name: BOA_HISTORY_URL
+      value: "http://transactionhistory.boa.svc.cluster.local:8080"
+  envFrom:
+    - name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret
 
 livenessProbe:
   httpGet:

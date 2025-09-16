@@ -71,6 +71,13 @@ helm upgrade --install action-orchestrator ./helm/workload -n fraudguard -f valu
 
 # Deploy Dashboard
 helm upgrade --install dashboard ./helm/workload -n fraudguard -f values/dashboard.yaml
+
+# Deploy BoA Monitor (requires Secret boa-api-credentials)
+# Create secret once:
+# kubectl -n fraudguard create secret generic boa-api-credentials \
+#   --from-literal=BOA_USERNAME=testuser \
+#   --from-literal=BOA_PASSWORD=bankofanthos
+helm upgrade --install boa-monitor-workload ./helm/workload -n fraudguard -f values/boa-monitor.yaml
 ```
 
 ## 🏗️ Architecture
@@ -148,6 +155,9 @@ Each service can be configured via environment variables. See individual values 
 - `PORT`: Service port (default: 8080)
 - `GEMINI_API_KEY`: Gemini API key for risk scoring
 - `BOA_BASE_URL`: Bank of Anthos base URL
+- `BOA_USERSERVICE_URL`: BoA userservice base URL (default: http://userservice.boa.svc.cluster.local:8080)
+- `BOA_HISTORY_URL`: BoA transactionhistory base URL (default: http://transactionhistory.boa.svc.cluster.local:8080)
+- `BOA_USERNAME`, `BOA_PASSWORD`: Injected via Kubernetes Secret `boa-api-credentials` (do not commit to Git)
 
 ## 🧪 Testing
 
