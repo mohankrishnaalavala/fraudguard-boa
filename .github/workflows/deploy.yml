@@ -41,8 +41,7 @@ jobs:
       - name: 🔐 Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: projects/1234567890/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-          service_account: github-actions@fraudguard-hackathon.iam.gserviceaccount.com
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
           
       - name: 🛠️ Setup Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -57,13 +56,13 @@ jobs:
           echo "🏗️ Building all FraudGuard services..."
           
           # Build all services
-          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator")
-          
+          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "boa-monitor")
+
           for service in "${services[@]}"; do
             echo "🔨 Building $service..."
             docker build -t ${{ env.REGISTRY }}/$service:${{ github.sha }} services/$service/
             docker push ${{ env.REGISTRY }}/$service:${{ github.sha }}
-            
+
             # Also tag as latest for this environment
             docker tag ${{ env.REGISTRY }}/$service:${{ github.sha }} ${{ env.REGISTRY }}/$service:${{ inputs.environment }}
             docker push ${{ env.REGISTRY }}/$service:${{ inputs.environment }}
@@ -91,20 +90,24 @@ jobs:
           kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
           
           # Update image tags in values files
-          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard")
-          
+          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
+
           for service in "${services[@]}"; do
             echo "📦 Deploying $service..."
-            
+
             # Update the image tag in values file
             sed -i "s|tag:.*|tag: ${{ inputs.environment }}|g" values/$service.yaml
-            
+
             # Deploy using Helm
             helm upgrade --install $service ./helm/workload \
               -f values/$service.yaml \
               -n ${{ env.NAMESPACE }} \
               --wait --timeout=300s
           done
+
+          # Deploy external LoadBalancer services for IP access
+          echo "🌐 Deploying external LoadBalancer services..."
+          kubectl apply -f k8s/external-services.yaml
           
       - name: ✅ Verify Deployment
         run: |
@@ -121,6 +124,11 @@ jobs:
           # Check service status
           echo "🌐 Service Status:"
           kubectl get svc -n ${{ env.NAMESPACE }}
+
+          # Check external LoadBalancer IPs
+          echo "🌍 External LoadBalancer Services:"
+          kubectl get svc -n ${{ env.NAMESPACE }} -l service=external-access
+          kubectl get svc -n boa -l service=external-access
           
       - name: 🧪 Health Check
         run: |
@@ -162,6 +170,14 @@ jobs:
           echo "MCP Gateway: kubectl port-forward -n ${{ env.NAMESPACE }} svc/mcp-gateway 8082:8080"
           echo "Bank of Anthos: kubectl port-forward -n boa svc/frontend 8081:80"
           echo ""
-          echo "🔗 Public URLs (if ingress configured):"
+          echo "🔗 External IP Access:"
+          echo "Get external IPs with: kubectl get svc -l service=external-access --all-namespaces"
+          echo ""
+          echo "📱 Access via External IPs:"
+          echo "FraudGuard Dashboard: http://[EXTERNAL-IP]/"
+          echo "FraudGuard API: http://[API-EXTERNAL-IP]/api/"
+          echo "Bank of Anthos: http://[BOA-EXTERNAL-IP]/"
+          echo ""
+          echo "🔗 Domain URLs (if configured):"
           echo "FraudGuard: https://fraudguard.mohankrishna.site"
           echo "Bank of Anthos: https://boa.mohankrishna.site"

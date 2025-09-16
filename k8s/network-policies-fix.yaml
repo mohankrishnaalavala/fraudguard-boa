@@ -1,0 +1,78 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-fraudguard-internal
+  namespace: fraudguard
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: fraudguard
+    - podSelector: {}
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: boa
+  - from: []
+    ports:
+    - port: 8080
+      protocol: TCP
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: fraudguard
+    - podSelector: {}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: boa
+  - to: []
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    - port: 8080
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-external-access
+  namespace: fraudguard
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dashboard
+  policyTypes:
+  - Ingress
+  ingress:
+  - from: []
+    ports:
+    - port: 8080
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mcp-gateway-external
+  namespace: fraudguard
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-gateway
+  policyTypes:
+  - Ingress
+  ingress:
+  - from: []
+    ports:
+    - port: 8080
+      protocol: TCP

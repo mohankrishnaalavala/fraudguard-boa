@@ -36,6 +36,7 @@ logger = structlog.get_logger()
 # Configuration
 PORT = int(os.getenv("PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
+MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.svc.cluster.local:8080")
 EXPLAIN_AGENT_URL = os.getenv("EXPLAIN_AGENT_URL", "http://explain-agent.fraudguard.svc.cluster.local:8080")
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", "10"))
 
@@ -64,6 +65,77 @@ def get_action_icon(action: str) -> str:
         "allow": "✅"
     }
     return icons.get(action, "❓")
+
+async def fetch_transactions() -> List[Dict[str, Any]]:
+    """Fetch recent transactions from MCP Gateway"""
+    try:
+        logger.info("fetching_transactions", url=f"{MCP_GATEWAY_URL}/api/recent-transactions")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{MCP_GATEWAY_URL}/api/recent-transactions",
+                timeout=15.0
+            )
+
+            logger.info("mcp_gateway_response",
+                       status_code=response.status_code,
+                       headers=dict(response.headers))
+
+            response.raise_for_status()
+
+            data = response.json()
+            transactions = data.get("transactions", [])
+            logger.info("transactions_fetched",
+                       count=len(transactions),
+                       sample_transaction=transactions[0] if transactions else None)
+
+            # Enhance transactions with display properties
+            for txn in transactions:
+                if txn.get("risk_score") is not None:
+                    txn["risk_color"] = get_risk_color(float(txn["risk_score"]))
+                    txn["risk_percentage"] = int(float(txn["risk_score"]) * 100)
+                else:
+                    txn["risk_color"] = "secondary"
+                    txn["risk_percentage"] = 0
+                    txn["risk_score"] = 0.0
+
+                # Format timestamp
+                if txn.get("timestamp"):
+                    try:
+                        if isinstance(txn["timestamp"], str):
+                            timestamp = datetime.fromisoformat(txn["timestamp"].replace("Z", "+00:00"))
+                        else:
+                            timestamp = txn["timestamp"]
+                        txn["formatted_time"] = timestamp.strftime("%H:%M:%S")
+                        txn["formatted_date"] = timestamp.strftime("%Y-%m-%d")
+                    except Exception as ts_error:
+                        logger.warning("timestamp_parse_failed",
+                                     timestamp=txn.get("timestamp"),
+                                     error=str(ts_error))
+                        txn["formatted_time"] = "Unknown"
+                        txn["formatted_date"] = "Unknown"
+
+            return transactions
+
+    except httpx.TimeoutException as e:
+        logger.error("mcp_gateway_timeout",
+                    url=f"{MCP_GATEWAY_URL}/api/recent-transactions",
+                    timeout=15.0,
+                    error=str(e))
+        return []
+    except httpx.HTTPStatusError as e:
+        logger.error("mcp_gateway_http_error",
+                    status_code=e.response.status_code,
+                    response_text=e.response.text,
+                    url=f"{MCP_GATEWAY_URL}/api/recent-transactions",
+                    error=str(e))
+        return []
+    except Exception as e:
+        logger.error("transactions_fetch_failed",
+                    url=f"{MCP_GATEWAY_URL}/api/recent-transactions",
+                    error_type=type(e).__name__,
+                    error=str(e))
+        return []
 
 async def fetch_audit_records() -> List[Dict[str, Any]]:
     """Fetch recent audit records from explain agent"""
@@ -108,101 +180,85 @@ def health_check():
     })
 
 @app.route("/")
-def dashboard():
-    """Main dashboard page"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>FraudGuard Dashboard</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    </head>
-    <body>
-        <div class="container mt-4">
-            <h1>🛡️ FraudGuard Dashboard</h1>
-            <p class="lead">Real-time transaction risk monitoring</p>
+async def dashboard():
+    """Main dashboard page with real-time data"""
+    try:
+        # Fetch real transaction data
+        transactions = await fetch_transactions()
 
-            <div class="row mb-4">
-                <div class="col-md-3">
-                    <div class="card">
-                        <div class="card-body">
-                            <h5 class="card-title text-danger">🚨 High Risk</h5>
-                            <h2 class="card-text">0</h2>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="card">
-                        <div class="card-body">
-                            <h5 class="card-title text-warning">⚠️ Medium Risk</h5>
-                            <h2 class="card-text">1</h2>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="card">
-                        <div class="card-body">
-                            <h5 class="card-title text-info">⚡ Low Risk</h5>
-                            <h2 class="card-text">0</h2>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="card">
-                        <div class="card-body">
-                            <h5 class="card-title text-success">✅ Normal</h5>
-                            <h2 class="card-text">1</h2>
-                        </div>
-                    </div>
-                </div>
-            </div>
+        # Calculate statistics
+        stats = {
+            "high_risk": 0,
+            "medium_risk": 0,
+            "low_risk": 0,
+            "normal": 0
+        }
 
-            <div class="card">
-                <div class="card-header">
-                    <h5>Recent Transactions</h5>
-                </div>
-                <div class="card-body">
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>Transaction ID</th>
-                                <th>Risk Score</th>
-                                <th>Action</th>
-                                <th>Explanation</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td><code>demo_001</code></td>
-                                <td><span class="badge bg-success">20%</span></td>
-                                <td>✅ Allow</td>
-                                <td>Normal transaction pattern</td>
-                            </tr>
-                            <tr>
-                                <td><code>demo_002</code></td>
-                                <td><span class="badge bg-warning">70%</span></td>
-                                <td>⚠️ Review</td>
-                                <td>Unusual transaction amount</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+        for txn in transactions:
+            risk_level = txn.get("risk_level", "normal").lower()
+            if risk_level == "high":
+                stats["high_risk"] += 1
+            elif risk_level == "medium":
+                stats["medium_risk"] += 1
+            elif risk_level == "low":
+                stats["low_risk"] += 1
+            else:
+                stats["normal"] += 1
+
+        # Get current timestamp
+        current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        return render_template("dashboard.html",
+                             transactions=transactions,
+                             stats=stats,
+                             current_time=current_time,
+                             refresh_interval=REFRESH_INTERVAL_SECONDS * 1000)
+
+    except Exception as e:
+        logger.error("dashboard_render_failed", error=str(e))
+        return render_template("error.html", error="Failed to load dashboard data")
 
 @app.route("/api/records")
 async def api_records():
-    """API endpoint for fetching records (for AJAX updates)"""
+    """API endpoint for fetching transaction records (for AJAX updates)"""
     try:
-        records = await fetch_audit_records()
-        return jsonify(records)
+        transactions = await fetch_transactions()
+        return jsonify(transactions)
 
     except Exception as e:
         logger.error("api_records_failed", error=str(e))
         return jsonify({"error": "Failed to fetch records"}), 500
+
+@app.route("/api/stats")
+async def api_stats():
+    """API endpoint for fetching dashboard statistics"""
+    try:
+        transactions = await fetch_transactions()
+
+        stats = {
+            "high_risk": 0,
+            "medium_risk": 0,
+            "low_risk": 0,
+            "normal": 0,
+            "total": len(transactions)
+        }
+
+        for txn in transactions:
+            risk_level = txn.get("risk_level", "normal").lower()
+            if risk_level == "high":
+                stats["high_risk"] += 1
+            elif risk_level == "medium":
+                stats["medium_risk"] += 1
+            elif risk_level == "low":
+                stats["low_risk"] += 1
+            else:
+                stats["normal"] += 1
+
+        return jsonify(stats)
+
+    except Exception as e:
+        logger.error("api_stats_failed", error=str(e))
+        return jsonify({"error": "Failed to fetch stats"}), 500
 
 if __name__ == "__main__":
     logger.info("starting_dashboard", port=PORT, explain_agent_url=EXPLAIN_AGENT_URL)

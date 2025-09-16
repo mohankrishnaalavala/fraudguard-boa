@@ -21,17 +21,21 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-env:
-  - name: BOA_LEDGER_URL
-    value: "http://ledgerwriter.boa.svc.cluster.local:8080"
-  - name: BOA_ACCOUNTS_URL
-    value: "http://accounts-db.boa.svc.cluster.local:5432"
-  - name: MCP_GATEWAY_URL
-    value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
-  - name: POLL_INTERVAL
-    value: "10"
-  - name: LOG_LEVEL
-    value: "INFO"
+container:
+  port: 8080
+  env:
+    - name: MCP_GATEWAY_URL
+      value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
+    - name: POLL_INTERVAL
+      value: "10"
+    - name: LOG_LEVEL
+      value: "INFO"
+    - name: BOA_USERSERVICE_URL
+      value: "http://userservice.boa.svc.cluster.local:8080"
+    - name: BOA_HISTORY_URL
+      value: "http://transactionhistory.boa.svc.cluster.local:8080"
+  envFrom:
+    - name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret
 
 livenessProbe:
   httpGet:
@@ -71,3 +75,75 @@ autoscaling:
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
+
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Allow egress to MCP Gateway in fraudguard namespace (port 8080)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: fraudguard
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: mcp-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow egress to Bank of Anthos services (userservice, transactionhistory) on port 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: boa
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Explicitly allow access to service ClusterIPs (some CNIs evaluate egress before kube-proxy NAT)
+    - to:
+        - ipBlock:
+            cidr: 34.118.232.191/32  # userservice ClusterIP
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 34.118.226.188/32  # transactionhistory ClusterIP
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 34.118.234.82/32   # mcp-gateway ClusterIP (defensive)
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 34.118.224.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
