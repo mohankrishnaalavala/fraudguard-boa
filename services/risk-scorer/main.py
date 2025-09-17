@@ -51,6 +51,12 @@ MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.sv
 EXPLAIN_AGENT_URL = os.getenv("EXPLAIN_AGENT_URL", "http://explain-agent.fraudguard.svc.cluster.local:8080")
 SKIP_RAG_HISTORY = os.getenv("SKIP_RAG_HISTORY", "false").lower() == "true"
 DISABLE_EXPLAIN_AGENT = os.getenv("DISABLE_EXPLAIN_AGENT", "false").lower() == "true"
+# Optional: include Bank of Anthos history in RAG
+RAG_INCLUDE_BOA = os.getenv("RAG_INCLUDE_BOA", "true").lower() == "true"
+BOA_USERSERVICE_URL = os.getenv("BOA_USERSERVICE_URL", "http://userservice.boa.svc.cluster.local:8080")
+BOA_HISTORY_URL = os.getenv("BOA_HISTORY_URL", "http://transactionhistory.boa.svc.cluster.local:8080")
+BOA_USERNAME = os.getenv("BOA_USERNAME", "")
+BOA_PASSWORD = os.getenv("BOA_PASSWORD", "")
 
 # Load API key from file (Secret Manager CSI) if provided
 if GEMINI_API_KEY_FILE:
@@ -133,6 +139,80 @@ Consider these fraud indicators:
 - High-risk merchant types
 - Geographic anomalies
 
+# Helper: decode JWT payload without verification (base64url)
+def _decode_jwt_noverify(token: str) -> dict:
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            return {}
+        import base64
+        padding = '=' * (-len(parts[1]) % 4)
+        payload_bytes = base64.urlsafe_b64decode(parts[1] + padding)
+        return json.loads(payload_bytes.decode('utf-8'))
+    except Exception:
+        return {}
+
+async def fetch_boa_history_for_account(account_id: str, limit: int = 100) -> list[dict]:
+    """Fetch transaction history for a specific account directly from Bank of Anthos.
+    Only returns data when BOA creds are configured and the JWT acct matches account_id.
+    """
+    if not RAG_INCLUDE_BOA:
+        return []
+    if not BOA_USERNAME or not BOA_PASSWORD:
+        logger.info("boa_history_skipped", reason="missing_credentials")
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # 1) Login to obtain JWT
+            login_url = f"{BOA_USERSERVICE_URL}/login"
+            params = {"username": BOA_USERNAME, "password": BOA_PASSWORD}
+            login_resp = await client.get(login_url, params=params)
+            if login_resp.status_code != 200:
+                logger.warning("boa_login_failed", status_code=login_resp.status_code)
+                return []
+            token = (login_resp.json() or {}).get("token")
+            if not token:
+                logger.warning("boa_login_no_token")
+                return []
+            # 2) Validate account match
+            claims = _decode_jwt_noverify(token)
+            acct = str(claims.get("acct", ""))
+            if acct != str(account_id):
+                logger.info("boa_history_acct_mismatch", requested=str(account_id), token_acct=acct)
+                return []
+            # 3) Fetch history
+            hist_url = f"{BOA_HISTORY_URL}/transactions/{acct}"
+            headers = {"Authorization": f"Bearer {token}"}
+            r = await client.get(hist_url, headers=headers)
+            if r.status_code != 200:
+                logger.warning("boa_history_non200", status=r.status_code)
+                return []
+            raw = r.json() or []
+            # Normalize minimally for RAG summarizer
+            out = []
+            for t in raw[:limit]:
+                try:
+                    to_acct = t.get("toAccountNum")
+                    amt_cents = t.get("amount", 0) or 0
+                    amt = float(amt_cents) / 100.0
+                    ts = t.get("timestamp")
+                    if isinstance(ts, (int, float)):
+                        ts_iso = datetime.fromtimestamp(ts/1000.0).isoformat()
+                    else:
+                        ts_iso = str(ts)
+                    out.append({
+                        "amount": abs(amt),
+                        "merchant": f"acct:{to_acct}" if to_acct else "boa",
+                        "timestamp": ts_iso,
+                    })
+                except Exception:
+                    continue
+            return out
+    except Exception as e:
+        logger.warning("boa_history_fetch_failed", error=str(e))
+        return []
+
+
 Response format:
 {{
     "risk_score": 0.0-1.0,
@@ -142,19 +222,41 @@ Response format:
     return prompt
 
 async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]:
-    """Retrieve recent transactions for the account from MCP Gateway for RAG."""
+    """Retrieve recent transactions for the account for RAG from multiple sources.
+    Sources:
+      - MCP Gateway (authoritative FraudGuard view)
+      - Bank of Anthos (optional, when credentials and account match)
+    """
     if SKIP_RAG_HISTORY:
         logger.info("history_skipped", account_id=account_id)
         return []
+    combined: list[dict] = []
+    # 1) MCP Gateway
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{MCP_GATEWAY_URL}/accounts/{account_id}/transactions", params={"limit": limit})
             if resp.status_code == 200:
-                return resp.json()
-            logger.warning("history_fetch_non200", status=resp.status_code)
+                combined.extend(resp.json() or [])
+            else:
+                logger.warning("history_fetch_non200", source="mcp", status=resp.status_code)
     except Exception as e:
-        logger.warning("history_fetch_failed", account_id=account_id, error=str(e))
-    return []
+        logger.warning("history_fetch_failed", source="mcp", account_id=account_id, error=str(e))
+    # 2) Bank of Anthos (optional)
+    try:
+        boa_hist = await fetch_boa_history_for_account(account_id, limit=limit)
+        combined.extend(boa_hist)
+    except Exception as e:
+        logger.info("boa_history_not_used", error=str(e))
+    # Deduplicate by minimal signature (timestamp+amount+merchant)
+    seen = set()
+    deduped = []
+    for tx in combined:
+        key = (str(tx.get("timestamp")), str(tx.get("amount")), str(tx.get("merchant", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tx)
+    return deduped[:limit]
 
 def summarize_history_for_rag(history: list[dict]) -> dict:
     """Summarize history into compact stats: known recipients, typical amounts, time windows."""

@@ -70,12 +70,12 @@ def get_action_icon(action: str) -> str:
 def fetch_transactions() -> List[Dict[str, Any]]:
     """Fetch recent transactions from MCP Gateway (sync)"""
     try:
-        logger.info("fetching_transactions", url=f"{MCP_GATEWAY_URL}/api/recent-transactions")
+        logger.debug("fetching_transactions", url=f"{MCP_GATEWAY_URL}/api/recent-transactions")
 
         with httpx.Client(timeout=15.0) as client:
             response = client.get(f"{MCP_GATEWAY_URL}/api/recent-transactions")
 
-        logger.info(
+        logger.debug(
             "mcp_gateway_response",
             status_code=response.status_code,
         )
@@ -117,7 +117,7 @@ def fetch_transactions() -> List[Dict[str, Any]]:
                     txn["formatted_time"] = ts.strftime("%H:%M:%S")
                     txn["formatted_date"] = ts.strftime("%Y-%m-%d")
                 except Exception as ts_error:
-                    logger.info("timestamp_parse_skip", error=str(ts_error))
+                    logger.debug("timestamp_parse_skip", error=str(ts_error))
                     txn["formatted_time"] = "Unknown"
                     txn["formatted_date"] = "Unknown"
 
