@@ -1,4 +1,4 @@
-Flask[async]==3.0.0
+Flask[async]==3.0.6
 httpx==0.25.2
 structlog==23.2.0
 Werkzeug==3.0.6
