@@ -21,6 +21,16 @@ container:
     - name: RISK_SCORER_URL
       value: "http://risk-scorer.fraudguard.svc.cluster.local:8080"
 
+# Give the container more startup time before readiness/liveness kick in
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 12
+
 resources:
   requests:
     cpu: "50m"
