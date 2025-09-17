@@ -50,7 +50,7 @@ serviceAccount:
   create: true
   name: ""
   annotations:
-    iam.gke.io/gcp-service-account: txn-watcher@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: txn-watcher@fraudguard-hackathon.iam.gserviceaccount.com
 
 networkPolicy:
   enabled: true
@@ -90,6 +90,25 @@ podSecurity:
   capabilities:
     drop:
       - ALL
+
+# Probes tuned for cold starts on GKE Autopilot
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 12
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 6
 
 secretManager:
   enabled: false
