@@ -404,7 +404,7 @@ async def get_account(account_id: str, client_ip: str = Depends(get_client_ip)):
 @app.get("/accounts/{account_id}/transactions", response_model=List[Transaction])
 async def get_recent_transactions(
     account_id: str,
-    limit: int = 10,
+    limit: int = 50,
     client_ip: str = Depends(get_client_ip)
 ):
     """Get recent transactions for an account (read-only)"""
@@ -414,9 +414,17 @@ async def get_recent_transactions(
 
     try:
         logger.info("transactions_requested", account_id=account_id, limit=limit, client_ip=client_ip)
+        # Clamp retention to last 50 per account for analysis context
+        try:
+            limit = max(1, min(int(limit), 50))
+        except Exception:
+            limit = 50
+
 
         # Get real transactions from database
         transaction_data = get_account_transactions(account_id, limit)
+
+
 
         transactions = []
         for txn_data in transaction_data:
@@ -511,6 +519,61 @@ async def get_all_recent_transactions(
     client_ip: str = Depends(get_client_ip)
 ):
     """Get all recent transactions across all accounts for dashboard"""
+
+@app.get("/mcp/schema")
+async def mcp_schema():
+    """Lightweight MCP-style schema for demo tooling."""
+    return {
+        "version": "0.1",
+        "tools": [
+            {
+                "name": "mcp.list_transactions",
+                "description": "List recent transactions for an account (max 50).",
+                "input": {"type": "object", "properties": {"account_id": {"type": "string"}, "limit": {"type": "integer"}}},
+                "output": {"type": "array", "items": {"type": "object"}}
+            },
+            {
+                "name": "mcp.analyze_transaction",
+                "description": "Run risk analysis for a transaction via risk-scorer.",
+                "input": {"type": "object", "properties": {"transaction": {"type": "object"}}},
+                "output": {"type": "object"}
+            }
+        ]
+    }
+
+@app.get("/mcp/transactions/{account_id}")
+async def mcp_list_transactions(account_id: str, limit: int = 50, client_ip: str = Depends(get_client_ip)):
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip, account_id=account_id)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        limit = max(1, min(int(limit), 50))
+        rows = get_account_transactions(account_id, limit)
+        # Return raw dicts (already sanitized by DB layer)
+        return rows
+    except Exception as e:
+        logger.error("mcp_list_transactions_failed", account_id=account_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal error")
+
+@app.post("/mcp/analyze")
+async def mcp_analyze(body: dict, client_ip: str = Depends(get_client_ip)):
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        txn = body.get("transaction", {})
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{os.getenv('RISK_SCORER_URL','http://risk-scorer.fraudguard.svc.cluster.local:8080')}/analyze",
+                json=txn,
+                timeout=15.0
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.error("mcp_analyze_failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Analyze forwarding failed")
+
     if not check_rate_limit(client_ip):
         logger.warning("rate_limit_exceeded", client_ip=client_ip)
         raise HTTPException(status_code=429, detail="Rate limit exceeded")

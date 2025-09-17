@@ -120,6 +120,20 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "risk-scorer", "timestamp": datetime.utcnow()}
 
+# Helper: decode JWT payload without verification (base64url)
+def _decode_jwt_noverify(token: str) -> dict:
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            return {}
+        import base64
+        padding = '=' * (-len(parts[1]) % 4)
+        payload_bytes = base64.urlsafe_b64decode(parts[1] + padding)
+        return json.loads(payload_bytes.decode('utf-8'))
+    except Exception:
+        return {}
+
+
 def create_risk_analysis_prompt(transaction: Transaction) -> str:
     """Create a privacy-safe prompt for Gemini analysis"""
     # Remove PII and create compact features
@@ -139,85 +153,7 @@ Consider these fraud indicators:
 - High-risk merchant types
 - Geographic anomalies
 
-# Helper: decode JWT payload without verification (base64url)
-def _decode_jwt_noverify(token: str) -> dict:
-    try:
-        parts = token.split('.')
-        if len(parts) != 3:
-            return {}
-        import base64
-        padding = '=' * (-len(parts[1]) % 4)
-        payload_bytes = base64.urlsafe_b64decode(parts[1] + padding)
-        return json.loads(payload_bytes.decode('utf-8'))
-    except Exception:
-        return {}
-
-async def fetch_boa_history_for_account(account_id: str, limit: int = 100) -> list[dict]:
-    """Fetch transaction history for a specific account directly from Bank of Anthos.
-    Only returns data when BOA creds are configured and the JWT acct matches account_id.
-    """
-    if not RAG_INCLUDE_BOA:
-        return []
-    if not BOA_USERNAME or not BOA_PASSWORD:
-        logger.info("boa_history_skipped", reason="missing_credentials")
-        return []
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # 1) Login to obtain JWT
-            login_url = f"{BOA_USERSERVICE_URL}/login"
-            params = {"username": BOA_USERNAME, "password": BOA_PASSWORD}
-            login_resp = await client.get(login_url, params=params)
-            if login_resp.status_code != 200:
-                logger.warning("boa_login_failed", status_code=login_resp.status_code)
-                return []
-            token = (login_resp.json() or {}).get("token")
-            if not token:
-                logger.warning("boa_login_no_token")
-                return []
-            # 2) Validate account match
-            claims = _decode_jwt_noverify(token)
-            acct = str(claims.get("acct", ""))
-            if acct != str(account_id):
-                logger.info("boa_history_acct_mismatch", requested=str(account_id), token_acct=acct)
-                return []
-            # 3) Fetch history
-            hist_url = f"{BOA_HISTORY_URL}/transactions/{acct}"
-            headers = {"Authorization": f"Bearer {token}"}
-            r = await client.get(hist_url, headers=headers)
-            if r.status_code != 200:
-                logger.warning("boa_history_non200", status=r.status_code)
-                return []
-            raw = r.json() or []
-            # Normalize minimally for RAG summarizer
-            out = []
-            for t in raw[:limit]:
-                try:
-                    to_acct = t.get("toAccountNum")
-                    amt_cents = t.get("amount", 0) or 0
-                    amt = float(amt_cents) / 100.0
-                    ts = t.get("timestamp")
-                    if isinstance(ts, (int, float)):
-                        ts_iso = datetime.fromtimestamp(ts/1000.0).isoformat()
-                    else:
-                        ts_iso = str(ts)
-                    out.append({
-                        "amount": abs(amt),
-                        "merchant": f"acct:{to_acct}" if to_acct else "boa",
-                        "timestamp": ts_iso,
-                    })
-                except Exception:
-                    continue
-            return out
-    except Exception as e:
-        logger.warning("boa_history_fetch_failed", error=str(e))
-        return []
-
-
-Response format:
-{{
-    "risk_score": 0.0-1.0,
-    "rationale": "Brief explanation of risk factors"
-}}
+Respond ONLY with a single JSON object: {{"risk_score": number between 0 and 1, "rationale": string}}
 """
     return prompt
 
@@ -259,42 +195,120 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
     return deduped[:limit]
 
 def summarize_history_for_rag(history: list[dict]) -> dict:
-    """Summarize history into compact stats: known recipients, typical amounts, time windows."""
-    from collections import defaultdict
+    """Summarize history with richer stats for RAG and pattern signals.
+    - known recipients with counts, typical amount, last_seen
+    - typical amount overall
+    - common hours and weekday/weekend split
+    - recent velocity windows (15m/60m)
+    """
+    from collections import defaultdict, Counter
     import statistics
-    recipients = defaultdict(list)
-    hours = []
-    amounts = []
+    recipients_amounts: dict[str, list[float]] = defaultdict(list)
+    recipients_last_seen: dict[str, str] = {}
+    hours: list[int] = []
+    weekdays: list[int] = []
+    amounts: list[float] = []
+    timestamps: list[datetime] = []
+
     for tx in history:
-        merchant = (tx.get("merchant") or "").lower()
-        amounts.append(float(tx.get("amount", 0)))
+        merchant = str(tx.get("merchant") or "").lower()
+        amt = float(tx.get("amount", 0))
+        amounts.append(amt)
         ts = tx.get("timestamp") or ""
         try:
             dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            timestamps.append(dt)
             hours.append(dt.hour)
+            weekdays.append(dt.weekday())
         except Exception:
             pass
         if merchant.startswith("acct:"):
-            recipients[merchant].append(float(tx.get("amount", 0)))
+            recipients_amounts[merchant].append(amt)
+            # keep the last ISO ts string if provided
+            if ts:
+                recipients_last_seen[merchant] = str(ts)
+
     top_known = []
-    for m, vals in recipients.items():
+    for m, vals in recipients_amounts.items():
         try:
             typical = statistics.median(vals)
         except statistics.StatisticsError:
             typical = vals[0] if vals else 0
-        top_known.append({"recipient": m, "count": len(vals), "typical_amount": round(typical, 2)})
+        top_known.append({
+            "recipient": m,
+            "count": len(vals),
+            "typical_amount": round(typical, 2),
+            "last_seen": recipients_last_seen.get(m)
+        })
     top_known.sort(key=lambda x: x["count"], reverse=True)
+
     typical_amount = round(statistics.median(amounts), 2) if amounts else 0
-    common_hours = []
-    if hours:
-        from collections import Counter
-        common_hours = [h for h, _ in Counter(hours).most_common(3)]
+    common_hours = [h for h, _ in Counter(hours).most_common(3)] if hours else []
+    weekday_count = sum(1 for d in weekdays if d < 5)
+    weekend_count = sum(1 for d in weekdays if d >= 5)
+
+    # Velocity windows relative to latest timestamp if present, else now
+    now_ref = max(timestamps).astimezone(timezone.utc) if timestamps else datetime.now(timezone.utc)
+    count_last_15m = sum(1 for dt in timestamps if (now_ref - dt).total_seconds() <= 15 * 60)
+    count_last_60m = sum(1 for dt in timestamps if (now_ref - dt).total_seconds() <= 60 * 60)
+
     return {
-        "known_recipients": top_known[:5],
+        "known_recipients": top_known[:10],
         "typical_amount": typical_amount,
         "common_hours": common_hours,
+        "weekday_count": weekday_count,
+        "weekend_count": weekend_count,
+        "velocity": {"count_last_15m": count_last_15m, "count_last_60m": count_last_60m},
         "history_count": len(history)
     }
+
+
+
+def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
+    """Derive structured pattern signals (no PII) from tx + RAG summary."""
+    try:
+        import math
+        amount = float(tx.get("amount", 0))
+        merchant = str(tx.get("merchant", "")).lower()
+        ts = str(tx.get("timestamp", ""))
+        # recipient stats
+        known_map = {k["recipient"]: k for k in rag_summary.get("known_recipients", [])}
+        is_known = merchant in known_map
+        typical_known = known_map.get(merchant, {}).get("typical_amount") if is_known else None
+        deviation_ratio = None
+        if is_known and typical_known and typical_known > 0:
+            deviation_ratio = round(amount / float(typical_known), 2)
+        # time signals
+        common_hours = rag_summary.get("common_hours", [])
+        try:
+            hour = datetime.fromisoformat(ts.replace("Z", "+00:00")).hour
+        except Exception:
+            hour = None
+        off_hours = hour is not None and common_hours and (hour not in common_hours)
+        # weekday/weekend
+        weekend_bias = None
+        wd = rag_summary.get("weekday_count", 0)
+        we = rag_summary.get("weekend_count", 0)
+        if (wd + we) > 0:
+            weekend_bias = round(we / max(1, (wd + we)), 2)
+        # velocity
+        vel = rag_summary.get("velocity", {})
+        v15 = int(vel.get("count_last_15m", 0))
+        v60 = int(vel.get("count_last_60m", 0))
+        signals = {
+            "known_recipient": bool(is_known),
+            "new_recipient": not is_known and merchant.startswith("acct:"),
+            "amount_deviation_from_known": deviation_ratio,
+            "amount_deviation_flag": deviation_ratio is not None and deviation_ratio >= 1.5,
+            "off_hours": bool(off_hours),
+            "weekend_bias": weekend_bias,
+            "velocity_15m": v15,
+            "velocity_60m": v60,
+            "velocity_flag": (v15 >= 3) or (v60 >= 5)
+        }
+        return signals
+    except Exception:
+        return {"signal_error": True}
 
 
 # Local heuristic as a last-resort when AI output is unavailable/unparsable
@@ -328,8 +342,9 @@ def heuristic_risk_from_tx(tx: dict) -> tuple[float, str]:
     except Exception:
         return 0.5, "Heuristic fallback due to error"
 
-def build_vertex_prompt(transaction: dict, rag_summary: dict) -> str:
-    """Construct a Vertex AI prompt with structured context from RAG summary."""
+def build_vertex_prompt(transaction: dict, rag_summary: dict, pattern_signals: dict | None = None) -> str:
+    """Construct a Vertex AI prompt with structured context and derived signals."""
+    signals_json = json.dumps(pattern_signals or {}, default=str)
     return (
         "You are an AI fraud analyst. Analyze the transaction with context. "
         "Output ONLY a single minified JSON object exactly matching this schema: "
@@ -337,8 +352,13 @@ def build_vertex_prompt(transaction: dict, rag_summary: dict) -> str:
         "No additional text, no explanations, no markdown, no code fences.\n"
         f"Transaction: {json.dumps(transaction, default=str)}\n"
         f"Context: {json.dumps(rag_summary, default=str)}\n"
+        f"Signals: {signals_json}\n"
         "Guidelines:\n"
-        "- Flag new/unknown recipients above $500 as higher risk.\n"
+        "- Consider known vs new recipients; large deviations from a known recipient's typical amount increase risk.\n"
+        "- Detect temporal anomalies: transactions outside common hours and weekend late-night.\n"
+        "- Incorporate velocity: multiple recent transactions (>=3 in 15m or >=5 in 60m) elevate risk.\n"
+        "- Weigh amount relative to typical amount for the account and recipient, not absolute only.\n"
+        "- Keep rationale concise and reference which factors (new recipient, amount deviation, off-hours, velocity).\n"
         "- If recipient is known with typical high amount (e.g., $1500), lower risk.\n"
         "- Consider unusual time (02:00-04:00) and deviation from typical amounts.\n"
         "- Consider recent frequency bursts. Keep rationale concise (<200 chars)."
@@ -895,7 +915,7 @@ async def analyze_transaction(transaction: Transaction):
         )
 
         # RAG: fetch and summarize account history
-        history = await fetch_account_history(transaction.account_id, limit=100)
+        history = await fetch_account_history(transaction.account_id, limit=50)
         try:
             rag_summary = summarize_history_for_rag(history)
         except Exception as e:
@@ -912,7 +932,23 @@ async def analyze_transaction(transaction: Transaction):
             "timestamp": transaction.timestamp.isoformat(),
             "location": transaction.location,
         }
-        prompt = build_vertex_prompt(tx_payload, rag_summary)
+        pattern_signals = analyze_pattern_signals(tx_payload, rag_summary)
+        prompt = build_vertex_prompt(tx_payload, rag_summary, pattern_signals)
+
+        # Structured signals (no PII) for debugging and model improvement
+        try:
+            logger.info(
+                "pattern_signals",
+                transaction_id=transaction.transaction_id,
+                known_recipient=bool(pattern_signals.get("known_recipient")),
+                amount_deviation_flag=bool(pattern_signals.get("amount_deviation_flag")),
+                off_hours=bool(pattern_signals.get("off_hours")),
+                velocity_15m=int(pattern_signals.get("velocity_15m", 0)),
+                velocity_60m=int(pattern_signals.get("velocity_60m", 0)),
+                velocity_flag=bool(pattern_signals.get("velocity_flag")),
+            )
+        except Exception:
+            pass
 
         # Temporary debug (no PII): log invocation mode and RAG size
         logger.info(
@@ -924,6 +960,7 @@ async def analyze_transaction(transaction: Transaction):
             location=GEMINI_LOCATION,
             model=GEMINI_MODEL,
             rag_history_count=int(rag_summary.get("history_count", 0)),
+            signals_included=True,
         )
 
         # Prefer GL API first when enabled
@@ -1007,6 +1044,30 @@ async def analyze_transaction(transaction: Transaction):
         )
         logging.exception("risk_analysis_failed_exception")
         raise HTTPException(status_code=500, detail="Risk analysis failed")
+
+
+@app.post("/a2a/route")
+async def a2a_route(payload: dict):
+    """Lightweight A2A routing endpoint for demo purposes.
+    Accepts: {"target": "explain-agent" | "risk-scorer", "message": {...}}
+    """
+    try:
+        target = str(payload.get("target", "")).lower()
+        message = payload.get("message", {})
+        if target == "explain-agent":
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(f"{EXPLAIN_AGENT_URL}/process", json=message, timeout=10.0)
+                resp.raise_for_status()
+            logger.info("a2a_forwarded", target=target)
+            return {"status": "ok", "forwarded_to": target}
+        else:
+            # For demo, echo back
+            logger.info("a2a_echo", target=target)
+            return {"status": "ok", "echo": True}
+    except Exception as e:
+        logger.error("a2a_route_error", error=str(e))
+        raise HTTPException(status_code=500, detail="A2A routing failed")
+
 
 if __name__ == "__main__":
     import uvicorn
