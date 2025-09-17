@@ -101,7 +101,8 @@
                                         <th>Transaction ID</th>
                                         <th>Risk Score</th>
                                         <th>Action</th>
-                                        <th>Explanation</th>
+                                        <th>AI Analysis</th>
+                                        <th>Notify</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -131,14 +132,16 @@
                                             {% endif %}
                                         </td>
                                         <td class="explanation-cell">
-                                            <strong>${{ "%.2f"|format(txn.amount) }}</strong> at {{ txn.merchant }}
-                                            {% if txn.risk_level == 'high' %}
-                                                <br><small class="text-danger">High-risk transaction detected</small>
-                                            {% elif txn.risk_level == 'medium' %}
-                                                <br><small class="text-warning">Unusual transaction pattern</small>
-                                            {% else %}
-                                                <br><small class="text-success">Normal transaction</small>
-                                            {% endif %}
+                                            <div><strong>${{ "%.2f"|format(txn.amount) }}</strong> at {{ txn.merchant }}</div>
+                                            <small class="text-muted">{{ txn.risk_explanation or 'No AI rationale available' }}</small>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-sm btn-outline-primary notify-btn"
+                                                    data-txid="{{ txn.transaction_id }}"
+                                                    data-score="{{ txn.risk_score }}"
+                                                    data-expl="{{ txn.risk_explanation }}">
+                                                Notify User
+                                            </button>
                                         </td>
                                     </tr>
                                     {% endfor %}
@@ -169,6 +172,36 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Simple auto-refresh functionality
+        document.addEventListener('click', async (e) => {
+                const btn = e.target.closest('.notify-btn');
+                if (!btn) return;
+                const txid = btn.getAttribute('data-txid');
+                const score = parseFloat(btn.getAttribute('data-score') || '0');
+                const expl = btn.getAttribute('data-expl') || 'Suspicious activity detected';
+                btn.disabled = true;
+                btn.textContent = 'Notifying...';
+                try {
+                    const resp = await fetch('/api/notify', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transaction_id: txid, risk_score: score, explanation: expl })
+                    });
+                    if (resp.ok) {
+                        btn.textContent = 'Notified ✅';
+                        btn.classList.remove('btn-outline-primary');
+                        btn.classList.add('btn-success');
+                    } else {
+                        btn.textContent = 'Failed ❌';
+                        btn.classList.remove('btn-outline-primary');
+                        btn.classList.add('btn-danger');
+                        setTimeout(() => { btn.textContent = 'Notify User'; btn.classList.add('btn-outline-primary'); btn.classList.remove('btn-danger'); btn.disabled = false; }, 2000);
+                    }
+                } catch (err) {
+                    btn.textContent = 'Error ❌';
+                    setTimeout(() => { btn.textContent = 'Notify User'; btn.disabled = false; }, 2000);
+                }
+            });
+
         setTimeout(function() {
             window.location.reload();
         }, {{ refresh_interval }});

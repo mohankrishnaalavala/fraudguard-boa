@@ -2,7 +2,7 @@ nameOverride: mcp-gateway
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/mcp-gateway
-  tag: fixed
+  tag: latest
   pullPolicy: Always
 
 replicaCount: 1
@@ -67,6 +67,14 @@ networkPolicy:
           port: 80
         - protocol: TCP
           port: 443
+    # Allow egress to internal FraudGuard services (risk-scorer, explain-agent, etc.)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: fraudguard
+      ports:
+        - protocol: TCP
+          port: 8080
     # Allow DNS resolution
     - to: []
       ports:
