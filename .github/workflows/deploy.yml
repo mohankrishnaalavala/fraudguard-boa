@@ -124,6 +124,11 @@ jobs:
           echo "🌐 Deploying external LoadBalancer services..."
           kubectl apply -f k8s/external-services.yaml
 
+      - name: 🧹 Cleanup test pods
+        run: |
+          echo "Cleaning up test pods (curl-boa) if present..."
+          kubectl delete pod -n ${{ env.NAMESPACE }} curl-boa --ignore-not-found=true
+
       - name: ✅ Verify Deployment
         run: |
           echo "🔍 Verifying deployment..."
