@@ -241,18 +241,21 @@ def api_stats():
         return jsonify({"error": "Failed to fetch stats"}), 500
 
 @app.route("/api/notify", methods=["POST"])
-async def api_notify():
+def api_notify():
     """Trigger a user notification via action-orchestrator for a given transaction."""
     try:
         payload = request.get_json(force=True) or {}
         transaction_id = payload.get("transaction_id")
-        risk_score = float(payload.get("risk_score", 0))
+        try:
+            risk_score = float(payload.get("risk_score", 0))
+        except Exception:
+            risk_score = 0.0
         explanation = payload.get("explanation", "Suspicious activity detected")
         if not transaction_id:
             return jsonify({"error": "transaction_id is required"}), 400
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
                 f"{ACTION_ORCHESTRATOR_URL}/execute",
                 json={
                     "transaction_id": transaction_id,
@@ -261,8 +264,8 @@ async def api_notify():
                     "explanation": explanation
                 }
             )
-            resp.raise_for_status()
-            return jsonify(resp.json())
+        resp.raise_for_status()
+        return jsonify(resp.json())
 
     except httpx.HTTPError as e:
         logger.error("notify_action_http_error", error=str(e))
