@@ -166,6 +166,8 @@ async def get_boa_transactions() -> List[Dict]:
                     norm.append({
                         "transactionId": txn_id,
                         "accountId": str(account_id),
+                        "fromAccountId": str(from_acct) if from_acct is not None else None,
+                        "recipientAccountId": str(to_acct) if to_acct is not None else None,
                         "amount": amount_dollars,
                         "description": "BoA Transaction",
                         "timestamp": iso_ts,
@@ -185,10 +187,15 @@ async def forward_to_fraudguard(transaction: Dict) -> bool:
 
     try:
         # Convert BoA transaction format to FraudGuard format
+        # Prefer recipient account encoded as merchant to enable pattern analysis
+        merchant_value = (
+            f"acct:{transaction.get('recipientAccountId')}"
+            if transaction.get('recipientAccountId') else transaction.get("description", "Unknown Merchant")
+        )
         fraudguard_transaction = {
             "transaction_id": transaction_id,
             "amount": abs(float(transaction.get("amount", 0))),  # Use absolute value
-            "merchant": transaction.get("description", "Unknown Merchant"),
+            "merchant": merchant_value,
             "user_id": transaction.get("accountId", "unknown_user"),
             "timestamp": transaction.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "source": "bank_of_anthos"

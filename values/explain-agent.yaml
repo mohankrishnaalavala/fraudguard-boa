@@ -19,6 +19,16 @@ container:
     - name: ACTION_ORCHESTRATOR_URL
       value: "http://action-orchestrator.fraudguard.svc.cluster.local:8080"
 
+# Give the container more startup time before readiness/liveness kick in
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 12
+
 resources:
   requests:
     cpu: "50m"
@@ -48,7 +58,7 @@ serviceAccount:
   create: true
   name: ""
   annotations:
-    iam.gke.io/gcp-service-account: explain-agent@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: explain-agent@fraudguard-hackathon.iam.gserviceaccount.com
 
 networkPolicy:
   enabled: true
@@ -88,6 +98,25 @@ podSecurity:
   capabilities:
     drop:
       - ALL
+
+# Probes tuned for cold starts on GKE Autopilot
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 12
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 6
 
 secretManager:
   enabled: false

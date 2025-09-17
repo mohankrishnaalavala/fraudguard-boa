@@ -66,6 +66,16 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# Optional startup probe to give the app more time before liveness/readiness
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 25
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 12
+
 livenessProbe:
   httpGet:
     path: /healthz
@@ -79,10 +89,10 @@ readinessProbe:
   httpGet:
     path: /healthz
     port: http
-  initialDelaySeconds: 5
+  initialDelaySeconds: 10
   periodSeconds: 5
-  timeoutSeconds: 3
-  failureThreshold: 3
+  timeoutSeconds: 5
+  failureThreshold: 6
 
 hpa:
   enabled: true
@@ -112,6 +122,13 @@ networkPolicy:
   #   ports:
   #     - protocol: TCP
   #       port: 443
+
+# Rolling update strategy defaults tuned for low spare capacity clusters
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 0
 
 nodeSelector: {}
 

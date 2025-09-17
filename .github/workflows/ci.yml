@@ -119,7 +119,7 @@ jobs:
       uses: google-github-actions/setup-gcloud@v1
 
     - name: Configure Docker to use gcloud as a credential helper
-      run: gcloud auth configure-docker ${{ env.REGISTRY }}
+      run: gcloud auth configure-docker us-docker.pkg.dev --quiet
 
     - name: Build and push Docker images
       run: |

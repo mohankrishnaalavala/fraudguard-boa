@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 import structlog
 
@@ -38,10 +38,28 @@ logger = structlog.get_logger()
 PORT = int(os.getenv("PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "PLACEHOLDER_GEMINI_API_KEY")
+GEMINI_API_KEY_FILE = os.getenv("GEMINI_API_KEY_FILE", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_PROJECT_ID = os.getenv("GEMINI_PROJECT_ID", "PROJECT_ID")
 GEMINI_LOCATION = os.getenv("GEMINI_LOCATION", "us-central1")
+USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "true").lower() == "true"
+USE_VERTEX_SDK = os.getenv("USE_VERTEX_SDK", "false").lower() == "true"
+# Force GL API first (OAuth) and optionally disable Vertex usage path
+PREFER_GL_API = os.getenv("PREFER_GL_API", "true").lower() == "true"
+FORCE_GL_OAUTH = os.getenv("FORCE_GL_OAUTH", "true").lower() == "true"
+MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.svc.cluster.local:8080")
 EXPLAIN_AGENT_URL = os.getenv("EXPLAIN_AGENT_URL", "http://explain-agent.fraudguard.svc.cluster.local:8080")
+SKIP_RAG_HISTORY = os.getenv("SKIP_RAG_HISTORY", "false").lower() == "true"
+DISABLE_EXPLAIN_AGENT = os.getenv("DISABLE_EXPLAIN_AGENT", "false").lower() == "true"
+
+# Load API key from file (Secret Manager CSI) if provided
+if GEMINI_API_KEY_FILE:
+    try:
+        with open(GEMINI_API_KEY_FILE, "r") as f:
+            GEMINI_API_KEY = f.read().strip()
+            logger.info("gemini_api_key_loaded_via_csi", path=GEMINI_API_KEY_FILE)
+    except Exception as e:
+        logger.error("gemini_api_key_file_error", path=GEMINI_API_KEY_FILE, error=str(e))
 
 # Set log level
 logging.getLogger().setLevel(getattr(logging, LOG_LEVEL))
@@ -51,6 +69,28 @@ app = FastAPI(
     description="Analyzes transaction risk using Gemini AI",
     version="0.1.0"
 )
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    try:
+        logger.info(
+            "request_in",
+            method=request.method,
+            path=request.url.path,
+            content_length=request.headers.get("content-length", "0"),
+            content_type=request.headers.get("content-type", "")
+        )
+        response = await call_next(request)
+        logger.info(
+            "request_out",
+            method=request.method,
+            path=request.url.path,
+            status=getattr(response, "status_code", None)
+        )
+        return response
+    except Exception as e:
+        logger.error("request_failed", method=request.method, path=request.url.path, error=str(e))
+        raise
 
 class Transaction(BaseModel):
     """Transaction input model"""
@@ -101,12 +141,328 @@ Response format:
 """
     return prompt
 
-async def call_gemini_api(prompt: str) -> dict:
-    """Call Gemini API for risk analysis"""
+async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]:
+    """Retrieve recent transactions for the account from MCP Gateway for RAG."""
+    if SKIP_RAG_HISTORY:
+        logger.info("history_skipped", account_id=account_id)
+        return []
     try:
-        # For demo purposes, return mock response
-        # In production, implement actual Gemini API call
-        if GEMINI_API_KEY == "PLACEHOLDER_GEMINI_API_KEY":
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{MCP_GATEWAY_URL}/accounts/{account_id}/transactions", params={"limit": limit})
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("history_fetch_non200", status=resp.status_code)
+    except Exception as e:
+        logger.warning("history_fetch_failed", account_id=account_id, error=str(e))
+    return []
+
+def summarize_history_for_rag(history: list[dict]) -> dict:
+    """Summarize history into compact stats: known recipients, typical amounts, time windows."""
+    from collections import defaultdict
+    import statistics
+    recipients = defaultdict(list)
+    hours = []
+    amounts = []
+    for tx in history:
+        merchant = (tx.get("merchant") or "").lower()
+        amounts.append(float(tx.get("amount", 0)))
+        ts = tx.get("timestamp") or ""
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            hours.append(dt.hour)
+        except Exception:
+            pass
+        if merchant.startswith("acct:"):
+            recipients[merchant].append(float(tx.get("amount", 0)))
+    top_known = []
+    for m, vals in recipients.items():
+        try:
+            typical = statistics.median(vals)
+        except statistics.StatisticsError:
+            typical = vals[0] if vals else 0
+        top_known.append({"recipient": m, "count": len(vals), "typical_amount": round(typical, 2)})
+    top_known.sort(key=lambda x: x["count"], reverse=True)
+    typical_amount = round(statistics.median(amounts), 2) if amounts else 0
+    common_hours = []
+    if hours:
+        from collections import Counter
+        common_hours = [h for h, _ in Counter(hours).most_common(3)]
+    return {
+        "known_recipients": top_known[:5],
+        "typical_amount": typical_amount,
+        "common_hours": common_hours,
+        "history_count": len(history)
+    }
+
+def build_vertex_prompt(transaction: dict, rag_summary: dict) -> str:
+    """Construct a Vertex AI prompt with structured context from RAG summary."""
+    return (
+        "You are an AI fraud analyst. Analyze the transaction with context. "
+        "Output ONLY a single minified JSON object exactly matching this schema: "
+        "{\"risk_score\": number between 0 and 1, \"rationale\": string}. "
+        "No additional text, no explanations, no markdown, no code fences.\n"
+        f"Transaction: {json.dumps(transaction, default=str)}\n"
+        f"Context: {json.dumps(rag_summary, default=str)}\n"
+        "Guidelines:\n"
+        "- Flag new/unknown recipients above $500 as higher risk.\n"
+        "- If recipient is known with typical high amount (e.g., $1500), lower risk.\n"
+        "- Consider unusual time (02:00-04:00) and deviation from typical amounts.\n"
+        "- Consider recent frequency bursts. Keep rationale concise (<200 chars)."
+    )
+
+async def call_vertex_ai(prompt: str) -> dict:
+    """Call Vertex AI (HTTP or SDK) using ADC; never crash caller.
+    Prefers SDK when USE_VERTEX_SDK=true, else falls back to HTTP.
+    """
+    # 1) Try SDK path if enabled
+    if USE_VERTEX_SDK:
+        try:
+            import anyio
+            def _sdk_invoke() -> dict:
+                from vertexai import init
+                from vertexai.generative_models import GenerativeModel, GenerationConfig
+                init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+                model = GenerativeModel(GEMINI_MODEL)
+                schema = {
+                    "type": "object",
+                    "properties": {
+                        "risk_score": {"type": "number"},
+                        "rationale": {"type": "string"}
+                    },
+                    "required": ["risk_score", "rationale"]
+                }
+                resp = model.generate_content(
+                    prompt,
+                    generation_config=GenerationConfig(
+                        temperature=0.1,
+                        max_output_tokens=1024,
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                    ),
+                )
+                # Prefer the SDK's text if present; otherwise try to concatenate parts
+                text = getattr(resp, "text", None)
+                if not text:
+                    pieces = []
+                    try:
+                        cands = getattr(resp, "candidates", []) or []
+                        if cands:
+                            content = getattr(cands[0], "content", None)
+                            if content:
+                                parts = getattr(content, "parts", []) or []
+                                for p in parts:
+                                    t = getattr(p, "text", None)
+                                    if t:
+                                        pieces.append(t)
+                    except Exception:
+                        pass
+                    text = "".join(pieces)
+                return {"_raw": text}
+            data = await anyio.to_thread.run_sync(_sdk_invoke)
+            text = data.get("_raw", "")
+            try:
+                result = json.loads(text)
+            except Exception:
+                import re
+                m = re.search(r"\{[\s\S]*\}", text)
+                result = json.loads(m.group(0)) if m else {"risk_score": 0.5, "rationale": "Unparsable AI output"}
+            logger.info("vertex_ai_call_success", parsed=bool("risk_score" in result), sdk=True)
+            # If SDK result is not valid JSON payload, try GL API fallback
+            if not (isinstance(result, dict) and "risk_score" in result and str(result.get("rationale", "")).lower() != "unparsable ai output"):
+                try:
+                    gl_result = anyio.run(call_gemini_api, prompt)  # run sync fallback
+                    if isinstance(gl_result, dict) and "risk_score" in gl_result:
+                        return gl_result
+                except Exception:
+                    pass
+            return result
+        except Exception as e:
+            logger.error("vertex_ai_error", error=str(e), sdk=True)
+            # fall through to HTTP
+
+    # 2) HTTP path (publishers/google/models/*:generateContent)
+    try:
+        import anyio
+        async def get_token_async() -> str:
+            def _sync_get_token() -> str:
+                import google.auth
+                from google.auth.transport.requests import Request
+                credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                credentials.refresh(Request())
+                return credentials.token
+            return await anyio.to_thread.run_sync(_sync_get_token, cancellable=True)
+
+        token = await get_token_async()
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 1024,
+                "response_mime_type": "application/json",
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "risk_score": {"type": "number"},
+                        "rationale": {"type": "string"}
+                    },
+                    "required": ["risk_score", "rationale"]
+                }
+            }        }
+
+        async def _invoke(url: str) -> dict:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json=body,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                # Handle functionCall(args={...}) structure first
+                try:
+                    for p in parts:
+                        if isinstance(p, dict):
+                            fc = p.get("function_call") or p.get("functionCall")
+                            if fc and isinstance(fc, dict):
+                                args = fc.get("args")
+                                if isinstance(args, dict) and "risk_score" in args and "rationale" in args:
+                                    return args
+                except Exception:
+                    pass
+                def decode_inline(part: dict) -> str:
+                    try:
+                        import base64
+                        # GL API uses inline_data; Vertex may use inlineData
+                        idata = part.get("inline_data") or part.get("inlineData")
+                        if isinstance(idata, dict):
+                            mt = idata.get("mime_type") or idata.get("mimeType")
+                            if mt and "json" in mt.lower():
+                                b64 = idata.get("data")
+                                if b64:
+                                    return base64.b64decode(b64).decode("utf-8", errors="ignore")
+                    except Exception:
+                        return ""
+                    return ""
+                pieces = []
+                for p in parts:
+                    if not isinstance(p, dict):
+                        continue
+                    t = p.get("text")
+                    if t:
+                        pieces.append(t)
+                        continue
+                    decoded = decode_inline(p)
+                    if decoded:
+                        pieces.append(decoded)
+                agg = "".join(pieces)
+                # Primary: parse concatenated text or decoded inline JSON
+                try:
+                    return json.loads(agg)
+                except Exception:
+                    pass
+                # Secondary: search json in concatenated text
+                try:
+                    import re
+                    m = re.search(r"\{[\s\S]*\}", agg)
+                    if m:
+                        return json.loads(m.group(0))
+                except Exception:
+                    pass
+                # Tertiary: deep search in the entire response structure
+                def find_json_obj(o):
+                    if isinstance(o, dict):
+                        if "risk_score" in o and "rationale" in o:
+                            return o
+                        for v in o.values():
+                            r = find_json_obj(v)
+                            if r is not None:
+                                return r
+                    elif isinstance(o, list):
+                        for v in o:
+                            r = find_json_obj(v)
+                            if r is not None:
+                                return r
+                    elif isinstance(o, str):
+                        try:
+                            jo = json.loads(o)
+                            if isinstance(jo, dict) and "risk_score" in jo and "rationale" in jo:
+                                return jo
+                        except Exception:
+                            try:
+                                m2 = re.search(r"\{[\s\S]*\}", o)
+                                if m2:
+                                    jo2 = json.loads(m2.group(0))
+                                    if isinstance(jo2, dict) and "risk_score" in jo2 and "rationale" in jo2:
+                                        return jo2
+                            except Exception:
+                                pass
+                    return None
+                found = find_json_obj(data)
+                if found is not None:
+                    return found
+                return {"risk_score": 0.5, "rationale": "Unparsable AI output"}
+
+        # Try v1 first, then v1beta1 on 404
+        v1_url = (
+            f"https://{GEMINI_LOCATION}-aiplatform.googleapis.com/v1/"
+            f"projects/{GEMINI_PROJECT_ID}/locations/{GEMINI_LOCATION}/publishers/google/models/{GEMINI_MODEL}:generateContent"
+        )
+        try:
+            result = await _invoke(v1_url)
+            logger.info("vertex_ai_call_success", parsed=bool("risk_score" in result), sdk=False, api_version="v1")
+            if not (isinstance(result, dict) and "risk_score" in result and str(result.get("rationale", "")).lower() != "unparsable ai output"):
+                try:
+                    gl_result = await call_gemini_api(prompt)
+                    if isinstance(gl_result, dict) and "risk_score" in gl_result:
+                        return gl_result
+                except Exception:
+                    pass
+            return result
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                v1b_url = (
+                    f"https://{GEMINI_LOCATION}-aiplatform.googleapis.com/v1beta1/"
+                    f"projects/{GEMINI_PROJECT_ID}/locations/{GEMINI_LOCATION}/publishers/google/models/{GEMINI_MODEL}:generateContent"
+                )
+                try:
+                    result = await _invoke(v1b_url)
+                    logger.info("vertex_ai_call_success", parsed=bool("risk_score" in result), sdk=False, api_version="v1beta1")
+                    if not (isinstance(result, dict) and "risk_score" in result and str(result.get("rationale", "")).lower() != "unparsable ai output"):
+                        try:
+                            gl_result = await call_gemini_api(prompt)
+                            if isinstance(gl_result, dict) and "risk_score" in gl_result:
+                                return gl_result
+                        except Exception:
+                            pass
+                    return result
+                except Exception as e2:
+                    logger.error("vertex_ai_error", error=str(e2), sdk=False, api_version="v1beta1")
+                    raise
+            else:
+                logger.error("vertex_ai_error", error=str(e), sdk=False, api_version="v1")
+                raise
+    except Exception as e:
+        logger.error("vertex_ai_error", error=str(e), sdk=False)
+        # Optional fallback to Gemini API if API key is present
+        if GEMINI_API_KEY and GEMINI_API_KEY != "PLACEHOLDER_GEMINI_API_KEY":
+            try:
+                alt = await call_gemini_api(prompt)
+                logger.info("ai_result_received", source="gemini_api", risk_score=float(alt.get("risk_score", 0.5)), rationale_preview=(str(alt.get("rationale", ""))[:80]))
+                return alt
+            except Exception as e2:
+                logger.error("gemini_api_fallback_error", error=str(e2))
+        return {"risk_score": 0.5, "rationale": "Vertex AI error - fallback used"}
+
+    return {"risk_score": 0.5, "rationale": "No AI response - default applied"}
+
+async def call_gemini_api(prompt: str) -> dict:
+    """Call Gemini API (generativelanguage.googleapis.com) using OAuth (preferred) or API key.
+    When FORCE_GL_OAUTH=true, skip API key path entirely.
+    """
+    try:
+        # If neither OAuth nor API key available, use intelligent mock for demo
+        if (not GEMINI_API_KEY or GEMINI_API_KEY == "PLACEHOLDER_GEMINI_API_KEY") and not FORCE_GL_OAUTH:
             logger.info("using_mock_gemini_response")
 
             # Intelligent rule-based mock scoring for demo
@@ -170,26 +526,191 @@ async def call_gemini_api(prompt: str) -> dict:
                 "rationale": rationale
             }
 
-        # Production Gemini API call would go here
-        # Example structure:
-        # async with httpx.AsyncClient() as client:
-        #     response = await client.post(
-        #         f"https://{GEMINI_LOCATION}-aiplatform.googleapis.com/v1/projects/{GEMINI_PROJECT_ID}/locations/{GEMINI_LOCATION}/publishers/google/models/{GEMINI_MODEL}:generateContent",
-        #         headers={
-        #             "Authorization": f"Bearer {GEMINI_API_KEY}",
-        #             "Content-Type": "application/json"
-        #         },
-        #         json={
-        #             "contents": [{"parts": [{"text": prompt}]}],
-        #             "generationConfig": {
-        #                 "temperature": 0.1,
-        #                 "maxOutputTokens": 256
-        #             }
-        #         },
-        #         timeout=30.0
-        #     )
-        #     response.raise_for_status()
-        #     return parse_gemini_response(response.json())
+        # Real Gemini API call (Generative Language API)
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 1024,
+                "response_mime_type": "application/json",
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "risk_score": {"type": "number"},
+                        "rationale": {"type": "string"}
+                    },
+                    "required": ["risk_score", "rationale"]
+                }
+            }        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Normalize model name for GL API (strip trailing -001 for 2.x variants)
+            gl_model = GEMINI_MODEL
+            if gl_model.startswith("gemini-2") and gl_model.endswith("-001"):
+                gl_model = gl_model.rsplit("-", 1)[0]
+            # Preferred: OAuth flow (Workload Identity / ADC)
+            if FORCE_GL_OAUTH:
+                try:
+                    import google.auth
+                    import google.auth.transport.requests as gar
+                    req = gar.Request()
+                    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/generative-language"])
+                    creds.refresh(req)
+                    oauth_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {creds.token}"}
+                    resp = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{gl_model}:generateContent",
+                        headers=oauth_headers,
+                        json=body,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                except Exception as oe:
+                    logger.error("gemini_api_oauth_error", error=str(oe))
+                    raise
+            else:
+                # Try API key first; if unauthorized, fall back to OAuth
+                try:
+                    resp = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{gl_model}:generateContent",
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-goog-api-key": GEMINI_API_KEY,
+                        },
+                        json=body,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                except httpx.HTTPStatusError as he:
+                    status = he.response.status_code
+                    if status in (401, 403):
+                        try:
+                            import google.auth
+                            import google.auth.transport.requests as gar
+                            req = gar.Request()
+                            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/generative-language"])
+                            creds.refresh(req)
+                            oauth_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {creds.token}"}
+                            resp2 = await client.post(
+                                f"https://generativelanguage.googleapis.com/v1beta/models/{gl_model}:generateContent",
+                                headers=oauth_headers,
+                                json=body,
+                            )
+                            resp2.raise_for_status()
+                            data = resp2.json()
+                        except Exception as oe:
+                            logger.error("gemini_api_oauth_error", error=str(oe))
+                            raise
+                    else:
+                        raise
+            # Structure-only debug and safety handling (no PII)
+            try:
+                candidates = data.get("candidates", []) if isinstance(data, dict) else []
+                cand_count = len(candidates)
+                pf = data.get("promptFeedback") or data.get("prompt_feedback") or {}
+                block_reason = pf.get("blockReason") or pf.get("block_reason")
+                first_parts = []
+                if cand_count > 0:
+                    maybe_parts = candidates[0].get("content", {}).get("parts", [])
+                    for prt in maybe_parts:
+                        if isinstance(prt, dict):
+                            ks = set(prt.keys()) & {"text","functionCall","function_call","inlineData","inline_data"}
+                            first_parts.append(sorted(list(ks)))
+                logger.info(
+                    "gemini_api_response_shape",
+                    cand_count=cand_count,
+                    has_prompt_feedback=bool(pf),
+                    block_reason=block_reason or "",
+                    first_part_kinds=first_parts,
+                )
+                if cand_count == 0:
+                    rationale = "Model returned no content (safety or empty). Conservative assessment applied."
+                    if block_reason:
+                        rationale = f"Model blocked ({block_reason}). Conservative assessment applied."
+                    return {"risk_score": 0.5, "rationale": rationale}
+            except Exception:
+                logger.info("gemini_api_shape_log_skip")
+            parts = (data.get("candidates", [{}])[0].get("content", {}).get("parts", []) if isinstance(data, dict) else [])
+            # Handle functionCall(args={...}) structure first
+            try:
+                for p in parts:
+                    if isinstance(p, dict):
+                        fc = p.get("function_call") or p.get("functionCall")
+                        if fc and isinstance(fc, dict):
+                            args = fc.get("args")
+                            if isinstance(args, dict) and "risk_score" in args and "rationale" in args:
+                                return args
+            except Exception:
+                pass
+            def decode_inline(part: dict) -> str:
+                try:
+                    import base64
+                    idata = part.get("inline_data") or part.get("inlineData")
+                    if isinstance(idata, dict):
+                        mt = idata.get("mime_type") or idata.get("mimeType")
+                        if mt and "json" in mt.lower():
+                            b64 = idata.get("data")
+                            if b64:
+                                return base64.b64decode(b64).decode("utf-8", errors="ignore")
+                except Exception:
+                    return ""
+                return ""
+            pieces = []
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                t = p.get("text")
+                if t:
+                    pieces.append(t)
+                    continue
+                decoded = decode_inline(p)
+                if decoded:
+                    pieces.append(decoded)
+            agg = "".join(pieces)
+            # Primary: parse concatenated text or decoded inline JSON
+            try:
+                return json.loads(agg)
+            except Exception:
+                pass
+            # Secondary: search json in concatenated text
+            try:
+                import re
+                m = re.search(r"\{[\s\S]*\}", agg)
+                if m:
+                    return json.loads(m.group(0))
+            except Exception:
+                pass
+            # Tertiary: deep search in the entire response structure
+            def find_json_obj(o):
+                if isinstance(o, dict):
+                    if "risk_score" in o and "rationale" in o:
+                        return o
+                    for v in o.values():
+                        r = find_json_obj(v)
+                        if r is not None:
+                            return r
+                elif isinstance(o, list):
+                    for v in o:
+                        r = find_json_obj(v)
+                        if r is not None:
+                            return r
+                elif isinstance(o, str):
+                    try:
+                        jo = json.loads(o)
+                        if isinstance(jo, dict) and "risk_score" in jo and "rationale" in jo:
+                            return jo
+                    except Exception:
+                        try:
+                            m2 = re.search(r"\{[\s\S]*\}", o)
+                            if m2:
+                                jo2 = json.loads(m2.group(0))
+                                if isinstance(jo2, dict) and "risk_score" in jo2 and "rationale" in jo2:
+                                    return jo2
+                        except Exception:
+                            pass
+                return None
+            found = find_json_obj(data)
+            if found is not None:
+                return found
+            return {"risk_score": 0.5, "rationale": "Model response unavailable (format). Conservative assessment applied."}
 
     except Exception as e:
         logger.error("gemini_api_error", error=str(e))
@@ -202,10 +723,15 @@ async def call_gemini_api(prompt: str) -> dict:
 async def send_to_explain_agent(risk_result: RiskScore):
     """Send risk analysis result to explain agent"""
     try:
+        # Ensure JSON-serializable payload (datetime → ISO string)
+        try:
+            payload = json.loads(risk_result.model_dump_json())  # Pydantic v2
+        except AttributeError:
+            payload = json.loads(risk_result.json())  # Pydantic v1 fallback
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{EXPLAIN_AGENT_URL}/process",
-                json=risk_result.dict(),
+                json=payload,
                 timeout=10.0
             )
             response.raise_for_status()
@@ -215,7 +741,8 @@ async def send_to_explain_agent(risk_result: RiskScore):
                 transaction_id=risk_result.transaction_id
             )
 
-    except httpx.HTTPError as e:
+    except Exception as e:
+        # Catch any serialization or HTTP errors and log; do not fail the analysis
         logger.error(
             "explain_agent_send_failed",
             transaction_id=risk_result.transaction_id,
@@ -224,7 +751,7 @@ async def send_to_explain_agent(risk_result: RiskScore):
 
 @app.post("/analyze", response_model=RiskScore)
 async def analyze_transaction(transaction: Transaction):
-    """Analyze transaction risk using Gemini"""
+    """Analyze transaction risk using Vertex AI with RAG (fallback to mock)."""
     try:
         logger.info(
             "risk_analysis_started",
@@ -233,17 +760,85 @@ async def analyze_transaction(transaction: Transaction):
             category=transaction.category
         )
 
-        # Create privacy-safe prompt
-        prompt = create_risk_analysis_prompt(transaction)
+        # RAG: fetch and summarize account history
+        history = await fetch_account_history(transaction.account_id, limit=100)
+        try:
+            rag_summary = summarize_history_for_rag(history)
+        except Exception as e:
+            logger.error("rag_summary_failed", error=str(e))
+            rag_summary = {"known_recipients": [], "typical_amount": 0, "common_hours": [], "history_count": 0}
 
-        # Call Gemini API
-        gemini_result = await call_gemini_api(prompt)
+        # Build Vertex prompt with RAG context
+        tx_payload = {
+            "transaction_id": transaction.transaction_id,
+            "account_id": transaction.account_id,
+            "amount": transaction.amount,
+            "merchant": transaction.merchant,
+            "category": transaction.category,
+            "timestamp": transaction.timestamp.isoformat(),
+            "location": transaction.location,
+        }
+        prompt = build_vertex_prompt(tx_payload, rag_summary)
+
+        # Temporary debug (no PII): log invocation mode and RAG size
+        logger.info(
+            "ai_invoke",
+            transaction_id=transaction.transaction_id,
+            use_vertex=bool(USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID"),
+            use_sdk=bool(USE_VERTEX_SDK),
+            project=GEMINI_PROJECT_ID,
+            location=GEMINI_LOCATION,
+            model=GEMINI_MODEL,
+            rag_history_count=int(rag_summary.get("history_count", 0)),
+        )
+
+        # Prefer GL API first when enabled
+        if PREFER_GL_API:
+            # Use the same strict prompt used for Vertex path
+            try:
+                ai_result = await call_gemini_api(prompt)
+            except Exception:
+                ai_result = {"risk_score": 0.5, "rationale": "Gemini API error - fallback used"}
+            # If GL result looks like fallback, optionally try Vertex
+            if (not isinstance(ai_result, dict)) or ("risk_score" not in ai_result) or (lambda _r: (_r == "unparsable ai output" or "conservative assessment applied" in _r))(str(ai_result.get("rationale", "")).lower()):
+                if USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID":
+                    ai_result = await call_vertex_ai(prompt)
+        else:
+            # Prefer Vertex AI call when enabled and configured
+            if USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID":
+                ai_result = await call_vertex_ai(prompt)
+            else:
+                # Fallback to GL API with legacy prompt
+                legacy_prompt = create_risk_analysis_prompt(transaction)
+                ai_result = await call_gemini_api(legacy_prompt)
+
+        # Temporary debug (no PII): log source and a short rationale preview
+        source = (
+            "gemini_api" if PREFER_GL_API else (
+                "vertex" if (USE_VERTEX_AI and GEMINI_PROJECT_ID != "PROJECT_ID") else (
+                    "gemini_api" if (GEMINI_API_KEY and GEMINI_API_KEY != "PLACEHOLDER_GEMINI_API_KEY") else "fallback"
+                )
+            )
+        )
+        logger.info(
+            "ai_result_received",
+            transaction_id=transaction.transaction_id,
+            source=source,
+            risk_score=float(ai_result.get("risk_score", 0.5)),
+            rationale_preview=(str(ai_result.get("rationale", ""))[:80]),
+        )
+
+        # Normalize result
+        score_val = float(ai_result.get("risk_score", 0.5))
+        rationale_val = ai_result.get("rationale", "No rationale provided")
+        if isinstance(rationale_val, str) and rationale_val.strip().lower() == "unparsable ai output":
+            rationale_val = "Model response unavailable (format). Conservative assessment applied."
 
         # Create risk score response
         risk_score = RiskScore(
             transaction_id=transaction.transaction_id,
-            risk_score=gemini_result["risk_score"],
-            rationale=gemini_result["rationale"],
+            risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+            rationale=rationale_val,
             timestamp=datetime.utcnow()
         )
 
@@ -254,16 +849,21 @@ async def analyze_transaction(transaction: Transaction):
         )
 
         # Send to explain agent for further processing
-        await send_to_explain_agent(risk_score)
+        if not DISABLE_EXPLAIN_AGENT:
+            await send_to_explain_agent(risk_score)
+        else:
+            logger.info("explain_agent_disabled")
 
         return risk_score
 
     except Exception as e:
+        # Log via structlog and stdlib logger (with traceback) to ensure visibility
         logger.error(
             "risk_analysis_failed",
             transaction_id=transaction.transaction_id,
             error=str(e)
         )
+        logging.exception("risk_analysis_failed_exception")
         raise HTTPException(status_code=500, detail="Risk analysis failed")
 
 if __name__ == "__main__":

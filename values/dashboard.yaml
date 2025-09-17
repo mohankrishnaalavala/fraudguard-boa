@@ -2,7 +2,7 @@ nameOverride: dashboard
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/dashboard
-  tag: dynamic
+  tag: latest
   pullPolicy: Always
 
 replicaCount: 1
@@ -16,6 +16,10 @@ container:
       value: "info"
     - name: EXPLAIN_AGENT_URL
       value: "http://explain-agent.fraudguard.svc.cluster.local:8080"
+    - name: ACTION_ORCHESTRATOR_URL
+      value: "http://action-orchestrator.fraudguard.svc.cluster.local:8080"
+    - name: MCP_GATEWAY_URL
+      value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: REFRESH_INTERVAL_SECONDS
       value: "10"
 
@@ -48,7 +52,7 @@ serviceAccount:
   create: true
   name: ""
   annotations:
-    iam.gke.io/gcp-service-account: dashboard@PROJECT_ID.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: dashboard@fraudguard-hackathon.iam.gserviceaccount.com
 
 networkPolicy:
   enabled: true

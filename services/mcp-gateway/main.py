@@ -69,7 +69,7 @@ rate_limit_store: Dict[str, List[float]] = {}
 db_lock = threading.Lock()
 
 def init_database():
-    """Initialize SQLite database for transactions"""
+    """Initialize SQLite database for transactions and ensure schema"""
     try:
         with sqlite3.connect(DATABASE_PATH) as conn:
             conn.execute("""
@@ -94,6 +94,15 @@ def init_database():
                 CREATE INDEX IF NOT EXISTS idx_created_at
                 ON transactions(created_at DESC)
             """)
+            # Schema migration: add risk_explanation if missing
+            try:
+                cur = conn.execute("PRAGMA table_info(transactions)")
+                cols = [row[1] for row in cur.fetchall()]
+                if "risk_explanation" not in cols:
+                    conn.execute("ALTER TABLE transactions ADD COLUMN risk_explanation TEXT")
+                    logger.info("schema_migrated_add_column", column="risk_explanation")
+            except Exception as mig_err:
+                logger.warning("schema_migration_failed", error=str(mig_err))
             conn.commit()
             logger.info("database_initialized", path=DATABASE_PATH)
     except Exception as e:
@@ -127,51 +136,52 @@ def store_transaction(transaction: dict) -> bool:
         return False
 
 async def trigger_risk_analysis(transaction: dict):
-    """Trigger risk analysis for a transaction"""
+    """Trigger risk analysis for a transaction using external AI with fallback"""
     try:
-        # For immediate demo purposes, calculate risk score directly
-        # This ensures the dashboard shows real risk analysis results
-        risk_score = calculate_risk_score_direct(transaction)
-        risk_level = "high" if risk_score > 0.7 else "medium" if risk_score > 0.4 else "low"
+        risk_score: float = 0.5
+        risk_level: str = "medium"
+        risk_explanation: str = ""
 
-        # Update transaction with risk analysis
-        update_transaction_risk(transaction["transaction_id"], risk_score, risk_level)
-
-        logger.info("risk_analysis_completed",
-                   transaction_id=transaction["transaction_id"],
-                   risk_score=risk_score,
-                   risk_level=risk_level)
-
-        # Also try to call the risk-scorer service for comparison
+        # Prefer external AI service (risk-scorer) to get score + rationale
         try:
             risk_scorer_url = os.getenv("RISK_SCORER_URL", "http://risk-scorer.fraudguard.svc.cluster.local:8080")
-
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     f"{risk_scorer_url}/analyze",
                     json=transaction
                 )
-
                 if response.status_code == 200:
                     risk_data = response.json()
-                    external_risk_score = risk_data.get("risk_score", risk_score)
-                    logger.info("external_risk_analysis_completed",
-                               transaction_id=transaction["transaction_id"],
-                               external_risk_score=external_risk_score,
-                               internal_risk_score=risk_score)
-
+                    risk_score = float(risk_data.get("risk_score", risk_score))
+                    risk_explanation = risk_data.get("rationale", "")
+                else:
+                    logger.warning("risk_scorer_non_200", status_code=response.status_code, body=response.text)
         except Exception as external_error:
             logger.warning("external_risk_analysis_failed",
-                          transaction_id=transaction.get("transaction_id"),
-                          error=str(external_error))
+                           transaction_id=transaction.get("transaction_id"),
+                           error=str(external_error))
+
+        # Fallback to internal heuristic scoring if needed
+        if not risk_explanation:
+            risk_score, risk_explanation = calculate_risk_score_direct(transaction)
+
+        risk_level = "high" if risk_score > 0.7 else "medium" if risk_score > 0.4 else "low"
+
+        # Update transaction with risk analysis
+        update_transaction_risk(transaction["transaction_id"], risk_score, risk_level, risk_explanation)
+
+        logger.info("risk_analysis_completed",
+                    transaction_id=transaction["transaction_id"],
+                    risk_score=risk_score,
+                    risk_level=risk_level)
 
     except Exception as e:
         logger.error("risk_analysis_error",
-                    transaction_id=transaction.get("transaction_id"),
-                    error=str(e))
+                     transaction_id=transaction.get("transaction_id"),
+                     error=str(e))
 
-def calculate_risk_score_direct(transaction: dict) -> float:
-    """Calculate risk score directly using the same logic as the AI service"""
+def calculate_risk_score_direct(transaction: dict) -> tuple[float, str]:
+    """Heuristic risk score with brief explanation (fallback when AI unavailable)"""
     try:
         amount = float(transaction.get("amount", 0))
         merchant = transaction.get("merchant", "").lower()
@@ -179,60 +189,69 @@ def calculate_risk_score_direct(transaction: dict) -> float:
 
         # Base risk score
         risk_score = 0.1
+        reasons = []
 
         # Amount-based risk
         if amount > 2000:
             risk_score += 0.5
+            reasons.append(f"High amount ${amount}")
         elif amount > 1000:
             risk_score += 0.4
+            reasons.append(f"Large amount ${amount}")
         elif amount > 500:
             risk_score += 0.2
+            reasons.append(f"Medium amount ${amount}")
 
         # Merchant-based risk
         suspicious_keywords = ["suspicious", "unknown", "cash", "atm", "foreign", "advance"]
         if any(keyword in merchant for keyword in suspicious_keywords):
             risk_score += 0.3
+            reasons.append("Suspicious merchant type")
 
         # Time-based risk (late night/early morning)
         if "t02:" in timestamp.lower() or "t03:" in timestamp.lower() or "t01:" in timestamp.lower():
             risk_score += 0.2
+            reasons.append("Late night activity")
 
         # Electronics purchases
         if "electronics" in merchant:
             risk_score += 0.1
+            reasons.append("Electronics merchant")
 
         # Coffee shops and restaurants are lower risk
         if any(word in merchant for word in ["coffee", "restaurant", "cafe"]):
             risk_score -= 0.1
+            reasons.append("Common merchant")
 
         # Cap the risk score
         risk_score = min(max(risk_score, 0.05), 0.95)
+        explanation = ("; ".join(reasons) or "Standard transaction pattern")
 
-        return round(risk_score, 2)
+        return round(risk_score, 2), explanation
 
     except Exception as e:
         logger.error("direct_risk_calculation_failed", error=str(e))
-        return 0.5
+        return 0.5, "Heuristic fallback used due to error"
 
-def update_transaction_risk(transaction_id: str, risk_score: float, risk_level: str):
+def update_transaction_risk(transaction_id: str, risk_score: float, risk_level: str, risk_explanation: str = ""):
     """Update transaction with risk analysis results"""
     try:
         with db_lock:
             with sqlite3.connect(DATABASE_PATH) as conn:
                 conn.execute("""
                     UPDATE transactions
-                    SET risk_score = ?, risk_level = ?
+                    SET risk_score = ?, risk_level = ?, risk_explanation = ?
                     WHERE transaction_id = ?
-                """, (risk_score, risk_level, transaction_id))
+                """, (risk_score, risk_level, risk_explanation, transaction_id))
                 conn.commit()
                 logger.info("transaction_risk_updated",
-                           transaction_id=transaction_id,
-                           risk_score=risk_score,
-                           risk_level=risk_level)
+                            transaction_id=transaction_id,
+                            risk_score=risk_score,
+                            risk_level=risk_level)
     except Exception as e:
         logger.error("transaction_risk_update_failed",
-                    transaction_id=transaction_id,
-                    error=str(e))
+                     transaction_id=transaction_id,
+                     error=str(e))
 
 def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
     """Get transactions for an account"""
@@ -242,7 +261,7 @@ def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("""
                     SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level
+                           timestamp, location, risk_score, risk_level, risk_explanation
                     FROM transactions
                     WHERE account_id = ?
                     ORDER BY timestamp DESC
@@ -260,7 +279,8 @@ def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
                         "timestamp": row["timestamp"],
                         "location": row["location"],
                         "risk_score": row["risk_score"],
-                        "risk_level": row["risk_level"]
+                        "risk_level": row["risk_level"],
+                        "risk_explanation": row["risk_explanation"]
                     })
 
                 logger.info("transactions_retrieved", account_id=account_id, count=len(transactions))
@@ -501,7 +521,7 @@ async def get_all_recent_transactions(
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("""
                     SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level, created_at
+                           timestamp, location, risk_score, risk_level, risk_explanation, created_at
                     FROM transactions
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -519,6 +539,7 @@ async def get_all_recent_transactions(
                         "location": row["location"],
                         "risk_score": row["risk_score"],
                         "risk_level": row["risk_level"] or "pending",
+                        "risk_explanation": row["risk_explanation"],
                         "created_at": row["created_at"]
                     })
 
