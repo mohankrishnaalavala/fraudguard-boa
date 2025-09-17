@@ -14,28 +14,34 @@ container:
       value: "8080"
     - name: LOG_LEVEL
       value: "info"
-    - name: GEMINI_API_KEY
-      value: "PLACEHOLDER_GEMINI_API_KEY"
     - name: GEMINI_MODEL
-      value: "gemini-1.5-flash"
+      value: "gemini-2.5-flash"
     - name: GEMINI_PROJECT_ID
       value: "fraudguard-hackathon"
     - name: GEMINI_LOCATION
       value: "us-central1"
     - name: EXPLAIN_AGENT_URL
       value: "http://explain-agent.fraudguard.svc.cluster.local:8080"
-    - name: USE_VERTEX_AI
-      value: "true"
     - name: MCP_GATEWAY_URL
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
+    - name: USE_VERTEX_AI
+      value: "false"
+    - name: USE_VERTEX_SDK
+      value: "false"
+    - name: PREFER_GL_API
+      value: "true"
+    - name: FORCE_GL_OAUTH
+      value: "true"
+  envFrom:
+    - name: risk-scorer-gemini
 
 resources:
   requests:
     cpu: "100m"
-    memory: "128Mi"
+    memory: "256Mi"
   limits:
     cpu: "500m"
-    memory: "512Mi"
+    memory: "1Gi"
 
 service:
   type: ClusterIP
@@ -79,6 +85,13 @@ networkPolicy:
       ports:
         - protocol: TCP
           port: 8080
+    # Allow metadata server for Workload Identity (ADC)
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
     # Allow DNS resolution
     - to: []
       ports:
@@ -110,5 +123,5 @@ secretManager:
     spec:
       parameters:
         secrets: |
-          - resourceName: "projects/PROJECT_ID/secrets/gemini-api-key/versions/latest"
-            path: "gemini-api-key"
+          - resourceName: "projects/PROJECT_ID/secrets/example-secret/versions/latest"
+            path: "example-secret"
