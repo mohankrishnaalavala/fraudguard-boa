@@ -194,6 +194,38 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
         "history_count": len(history)
     }
 
+
+# Local heuristic as a last-resort when AI output is unavailable/unparsable
+# Mirrors gateway's simple rules but kept here to provide a useful rationale
+# without leaking PII.
+def heuristic_risk_from_tx(tx: dict) -> tuple[float, str]:
+    try:
+        amount = float(tx.get("amount", 0))
+        merchant = str(tx.get("merchant", "")).lower()
+        ts = str(tx.get("timestamp", ""))
+        risk = 0.1
+        reasons = []
+        if amount > 2000:
+            risk += 0.5; reasons.append(f"High amount ${amount}")
+        elif amount > 1000:
+            risk += 0.4; reasons.append(f"Large amount ${amount}")
+        elif amount > 500:
+            risk += 0.2; reasons.append(f"Medium amount ${amount}")
+        for kw in ["suspicious","unknown","cash","atm","foreign","advance"]:
+            if kw in merchant:
+                risk += 0.3; reasons.append("Suspicious merchant type"); break
+        if any(x in ts for x in ["T01:","T02:","T03:"]):
+            risk += 0.2; reasons.append("Late night activity")
+        if "electronics" in merchant:
+            risk += 0.1; reasons.append("Electronics merchant")
+        if any(w in merchant for w in ["coffee","restaurant","cafe"]):
+            risk -= 0.1; reasons.append("Common merchant")
+        risk = min(max(risk, 0.05), 0.95)
+        rationale = "; ".join(reasons) or "Standard transaction pattern"
+        return round(risk, 2), rationale
+    except Exception:
+        return 0.5, "Heuristic fallback due to error"
+
 def build_vertex_prompt(transaction: dict, rag_summary: dict) -> str:
     """Construct a Vertex AI prompt with structured context from RAG summary."""
     return (
@@ -828,11 +860,19 @@ async def analyze_transaction(transaction: Transaction):
             rationale_preview=(str(ai_result.get("rationale", ""))[:80]),
         )
 
-        # Normalize result
+        # Normalize result (and improve when AI output format is unavailable)
         score_val = float(ai_result.get("risk_score", 0.5))
         rationale_val = ai_result.get("rationale", "No rationale provided")
-        if isinstance(rationale_val, str) and rationale_val.strip().lower() == "unparsable ai output":
-            rationale_val = "Model response unavailable (format). Conservative assessment applied."
+        rlow = str(rationale_val).strip().lower()
+        if (
+            "conservative assessment applied" in rlow
+            or rlow == "unparsable ai output"
+            or rlow.startswith("vertex ai error")
+            or rlow.startswith("unable to analyze")
+        ):
+            h_score, h_reason = heuristic_risk_from_tx(tx_payload)
+            score_val = h_score
+            rationale_val = f"Heuristic fallback: {h_reason}"
 
         # Create risk score response
         risk_score = RiskScore(
