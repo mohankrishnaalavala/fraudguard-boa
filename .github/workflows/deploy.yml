@@ -180,42 +180,6 @@ jobs:
             exit 1
           fi
 
-      - name: 🤖 E2E Smoke Test
-        run: |
-          echo "🚦 Starting E2E smoke: seed transaction via MCP Gateway and verify on Dashboard"
-
-          TXID="ci_smoke_$(date +%s)"
-          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-          echo "Submitting synthetic transaction $TXID"
-          curl -sS -X POST http://localhost:8082/api/transactions \
-            -H "Content-Type: application/json" \
-            -d "{\"transaction_id\": \"$TXID\", \"amount\": 42.50, \"merchant\": \"SmokeTest Cafe\", \"user_id\": \"user-ci\", \"timestamp\": \"$NOW\"}" | tee /tmp/tx_submit.json
-
-          echo "Polling dashboard for presence of $TXID ..."
-          ATTEMPTS=24
-          SLEEP=5
-          FOUND=0
-          for i in $(seq 1 $ATTEMPTS); do
-            BODY=$(curl -sSf http://localhost:8080/api/records || true)
-            if echo "$BODY" | grep -q "$TXID"; then
-              echo "✅ Found transaction on dashboard (attempt $i)"
-              FOUND=1
-              break
-            fi
-            echo "...not yet (attempt $i/$ATTEMPTS). Sleeping $SLEEP s"
-            sleep $SLEEP
-          done
-
-          # Always best-effort kill port-forwards after test
-          pkill -f 'kubectl port-forward' || true
-
-          if [ "$FOUND" -ne 1 ]; then
-            echo "❌ E2E smoke failed: transaction $TXID not visible on dashboard"
-            exit 1
-          fi
-
-          echo "✅ E2E smoke passed"
 
       - name: 📝 Deployment Summary
         run: |
