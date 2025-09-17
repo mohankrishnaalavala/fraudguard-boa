@@ -50,7 +50,7 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
           
       - name: 🔧 Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGISTRY }}
+        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
         
       - name: 🏗️ Build and Push All Images
         run: |
