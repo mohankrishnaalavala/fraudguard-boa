@@ -185,52 +185,28 @@ async def trigger_risk_analysis(transaction: dict):
                      error=str(e))
 
 def calculate_risk_score_direct(transaction: dict) -> tuple[float, str]:
-    """Heuristic risk score with brief explanation (fallback when AI unavailable)"""
+    """Heuristic risk score using only BoA fields (amount, timestamp)."""
     try:
         amount = float(transaction.get("amount", 0))
-        merchant = transaction.get("merchant", "").lower()
-        timestamp = transaction.get("timestamp", "")
+        timestamp = str(transaction.get("timestamp", ""))
 
-        # Base risk score
         risk_score = 0.1
         reasons = []
 
-        # Amount-based risk
+        # Amount-based risk only
         if amount > 2000:
-            risk_score += 0.5
-            reasons.append(f"High amount ${amount}")
+            risk_score += 0.5; reasons.append(f"High amount ${amount}")
         elif amount > 1000:
-            risk_score += 0.4
-            reasons.append(f"Large amount ${amount}")
+            risk_score += 0.4; reasons.append(f"Large amount ${amount}")
         elif amount > 500:
-            risk_score += 0.2
-            reasons.append(f"Medium amount ${amount}")
-
-        # Merchant-based risk
-        suspicious_keywords = ["suspicious", "unknown", "cash", "atm", "foreign", "advance"]
-        if any(keyword in merchant for keyword in suspicious_keywords):
-            risk_score += 0.3
-            reasons.append("Suspicious merchant type")
+            risk_score += 0.2; reasons.append(f"Medium amount ${amount}")
 
         # Time-based risk (late night/early morning)
-        if "t02:" in timestamp.lower() or "t03:" in timestamp.lower() or "t01:" in timestamp.lower():
-            risk_score += 0.2
-            reasons.append("Late night activity")
+        if any(h in timestamp.lower() for h in ["t01:", "t02:", "t03:"]):
+            risk_score += 0.2; reasons.append("Late night activity")
 
-        # Electronics purchases
-        if "electronics" in merchant:
-            risk_score += 0.1
-            reasons.append("Electronics merchant")
-
-        # Coffee shops and restaurants are lower risk
-        if any(word in merchant for word in ["coffee", "restaurant", "cafe"]):
-            risk_score -= 0.1
-            reasons.append("Common merchant")
-
-        # Cap the risk score
         risk_score = min(max(risk_score, 0.05), 0.95)
         explanation = ("; ".join(reasons) or "Standard transaction pattern")
-
         return round(risk_score, 2), explanation
 
     except Exception as e:
