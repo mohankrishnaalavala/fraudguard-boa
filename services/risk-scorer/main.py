@@ -222,9 +222,9 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
             weekdays.append(dt.weekday())
         except Exception:
             pass
-        if merchant.startswith("acct:"):
+        # Treat any repeated merchant/payee as a recipient key for history (not only acct:*)
+        if merchant:
             recipients_amounts[merchant].append(amt)
-            # keep the last ISO ts string if provided
             if ts:
                 recipients_last_seen[merchant] = str(ts)
 
@@ -297,7 +297,7 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
         v60 = int(vel.get("count_last_60m", 0))
         signals = {
             "known_recipient": bool(is_known),
-            "new_recipient": not is_known and merchant.startswith("acct:"),
+            "new_recipient": (not is_known) and bool(merchant),
             "amount_deviation_from_known": deviation_ratio,
             "amount_deviation_flag": deviation_ratio is not None and deviation_ratio >= 1.5,
             "off_hours": bool(off_hours),
