@@ -329,17 +329,48 @@ async def get_status():
         "last_poll": getattr(health_check, 'last_poll', None)
     }
 
+@app.get("/transactions/{account_id}")
+async def get_account_transactions(account_id: str, limit: int = 50):
+    """Get transaction history for a specific account from Bank of Anthos"""
+    try:
+        # Fetch all BoA transactions
+        all_transactions = await get_boa_transactions()
+
+        # Filter transactions for the specific account
+        account_transactions = []
+        for tx in all_transactions:
+            # Check if this transaction involves the requested account
+            if (tx.get("accountId") == account_id or
+                tx.get("fromAccountId") == account_id or
+                tx.get("recipientAccountId") == account_id):
+                account_transactions.append(tx)
+
+        # Sort by timestamp (newest first) and limit results
+        account_transactions.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        limited_transactions = account_transactions[:limit]
+
+        logger.info("account_transactions_retrieved",
+                   account_id=account_id,
+                   total_found=len(account_transactions),
+                   returned=len(limited_transactions))
+
+        return limited_transactions
+
+    except Exception as e:
+        logger.error("get_account_transactions_failed", account_id=account_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/manual-sync")
 async def manual_sync():
     """Manually trigger a sync cycle"""
     try:
         transactions = await get_boa_transactions()
         forwarded = 0
-        
+
         for transaction in transactions:
             if await forward_to_fraudguard(transaction):
                 forwarded += 1
-        
+
         return {
             "status": "success",
             "transactions_found": len(transactions),
