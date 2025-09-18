@@ -107,6 +107,19 @@ def fetch_transactions() -> List[Dict[str, Any]]:
             txn["risk_color"] = get_risk_color(score)
             txn["risk_percentage"] = int(score * 100)
 
+
+            # Normalize/derive risk_level if missing or pending to keep UI and metrics consistent
+            level = str(txn.get("risk_level", "")).lower().strip()
+            if level not in {"high", "medium", "low"}:
+                # Match gateway thresholds
+                if score > 0.7:
+                    level = "high"
+                elif score > 0.4:
+                    level = "medium"
+                else:
+                    level = "low"
+                txn["risk_level"] = level
+
             # Format timestamp
             if txn.get("timestamp"):
                 try:
