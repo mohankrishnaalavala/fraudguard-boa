@@ -82,7 +82,12 @@ def fetch_transactions() -> List[Dict[str, Any]]:
 
         response.raise_for_status()
         data = response.json()
-        transactions = data.get("transactions", [])
+        # Accept both shapes from MCP Gateway: either an object { transactions: [...] }
+        # or a raw array [...]. Be tolerant to ensure metrics and records stay in sync.
+        if isinstance(data, list):
+            transactions = data
+        else:
+            transactions = data.get("transactions", [])
 
         # Log only safe summary to avoid serialization issues
         first_id = transactions[0].get("transaction_id") if transactions and isinstance(transactions[0], dict) else None
