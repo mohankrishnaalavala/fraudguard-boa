@@ -5,7 +5,7 @@ Risk Scorer Service - Uses Gemini to analyze transaction risk
 import logging
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -157,6 +157,49 @@ Respond ONLY with a single JSON object: {{"risk_score": number between 0 and 1, 
 """
     return prompt
 
+async def fetch_boa_history_for_account(account_id: str, limit: int = 100) -> list[dict]:
+    """Fetch transaction history from Bank of Anthos for the given account.
+
+    This function connects to the boa-monitor service to get actual Bank of Anthos
+    transaction data for the specified account.
+    """
+    try:
+        boa_monitor_url = os.getenv("BOA_MONITOR_URL", "http://boa-monitor-workload.fraudguard.svc.cluster.local:8080")
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Try to get BoA transactions for this account
+            resp = await client.get(f"{boa_monitor_url}/transactions/{account_id}", params={"limit": limit})
+
+            if resp.status_code == 200:
+                boa_transactions = resp.json()
+                logger.info("boa_history_fetched", account_id=account_id, count=len(boa_transactions))
+
+                # Convert BoA format to standard format for RAG
+                normalized = []
+                for tx in boa_transactions:
+                    try:
+                        # Convert BoA transaction to standard format
+                        normalized_tx = {
+                            "transaction_id": tx.get("transactionId", tx.get("transaction_id")),
+                            "account_id": tx.get("accountId", tx.get("account_id", account_id)),
+                            "amount": abs(float(tx.get("amount", 0))),
+                            "merchant": tx.get("merchant", f"acct:{tx.get('recipientAccountId', 'unknown')}"),
+                            "timestamp": tx.get("timestamp"),
+                            "source": "bank_of_anthos"
+                        }
+                        normalized.append(normalized_tx)
+                    except Exception as e:
+                        logger.warning("boa_tx_normalization_failed", error=str(e), tx=tx)
+
+                return normalized
+            else:
+                logger.warning("boa_history_fetch_failed", account_id=account_id, status=resp.status_code)
+                return []
+
+    except Exception as e:
+        logger.warning("boa_history_error", account_id=account_id, error=str(e))
+        return []
+
 async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]:
     """Retrieve recent transactions for the account for RAG from multiple sources.
     Sources:
@@ -167,22 +210,31 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
         logger.info("history_skipped", account_id=account_id)
         return []
     combined: list[dict] = []
-    # 1) MCP Gateway
+
+    # 1) MCP Gateway - Primary source for FraudGuard processed transactions
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{MCP_GATEWAY_URL}/accounts/{account_id}/transactions", params={"limit": limit})
             if resp.status_code == 200:
-                combined.extend(resp.json() or [])
+                mcp_data = resp.json()
+                if isinstance(mcp_data, list):
+                    combined.extend(mcp_data)
+                elif isinstance(mcp_data, dict) and "transactions" in mcp_data:
+                    combined.extend(mcp_data["transactions"])
+                logger.info("mcp_history_fetched", account_id=account_id, count=len(combined))
             else:
                 logger.warning("history_fetch_non200", source="mcp", status=resp.status_code)
     except Exception as e:
         logger.warning("history_fetch_failed", source="mcp", account_id=account_id, error=str(e))
-    # 2) Bank of Anthos (optional)
+
+    # 2) Bank of Anthos (optional) - Additional historical context
     try:
         boa_hist = await fetch_boa_history_for_account(account_id, limit=limit)
         combined.extend(boa_hist)
+        logger.info("boa_history_added", account_id=account_id, boa_count=len(boa_hist), total_count=len(combined))
     except Exception as e:
-        logger.info("boa_history_not_used", error=str(e))
+        logger.info("boa_history_not_used", account_id=account_id, error=str(e))
+
     # Deduplicate by minimal signature (timestamp+amount+merchant)
     seen = set()
     deduped = []
@@ -192,7 +244,29 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
             continue
         seen.add(key)
         deduped.append(tx)
+
+    logger.info("history_deduped", account_id=account_id, original_count=len(combined), final_count=len(deduped))
     return deduped[:limit]
+
+def extract_recipient_key(transaction: dict) -> str:
+    """Extract a consistent recipient key from transaction data.
+
+    For account-to-account transfers: use the account number (acct:XXXXX)
+    For merchant transactions: use the merchant name
+    This ensures proper recipient recognition across different transaction types.
+    """
+    merchant = str(transaction.get("merchant") or "").strip()
+
+    # For account transfers, the merchant field contains the recipient account
+    if merchant.startswith("acct:"):
+        return merchant.lower()
+
+    # For regular merchant transactions, use merchant name
+    if merchant:
+        return merchant.lower()
+
+    # Fallback for transactions without clear recipient
+    return "unknown_recipient"
 
 def summarize_history_for_rag(history: list[dict]) -> dict:
     """Summarize history with richer stats for RAG and pattern signals.
@@ -211,10 +285,12 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
     timestamps: list[datetime] = []
 
     for tx in history:
-        merchant = str(tx.get("merchant") or "").lower()
+        # Use improved recipient extraction
+        recipient_key = extract_recipient_key(tx)
         amt = float(tx.get("amount", 0))
         amounts.append(amt)
         ts = tx.get("timestamp") or ""
+
         try:
             dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             timestamps.append(dt)
@@ -222,11 +298,12 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
             weekdays.append(dt.weekday())
         except Exception:
             pass
-        # Treat any repeated merchant/payee as a recipient key for history (not only acct:*)
-        if merchant:
-            recipients_amounts[merchant].append(amt)
+
+        # Track recipient patterns for both account transfers and merchant transactions
+        if recipient_key and recipient_key != "unknown_recipient":
+            recipients_amounts[recipient_key].append(amt)
             if ts:
-                recipients_last_seen[merchant] = str(ts)
+                recipients_last_seen[recipient_key] = str(ts)
 
     top_known = []
     for m, vals in recipients_amounts.items():
@@ -269,12 +346,15 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
     try:
         import math
         amount = float(tx.get("amount", 0))
-        merchant = str(tx.get("merchant", "")).lower()
+
+        # Use consistent recipient key extraction
+        recipient_key = extract_recipient_key(tx)
         ts = str(tx.get("timestamp", ""))
-        # recipient stats
+
+        # recipient stats - check against known recipients using consistent key
         known_map = {k["recipient"]: k for k in rag_summary.get("known_recipients", [])}
-        is_known = merchant in known_map
-        typical_known = known_map.get(merchant, {}).get("typical_amount") if is_known else None
+        is_known = recipient_key in known_map
+        typical_known = known_map.get(recipient_key, {}).get("typical_amount") if is_known else None
         deviation_ratio = None
         if is_known and typical_known and typical_known > 0:
             deviation_ratio = round(amount / float(typical_known), 2)
@@ -297,7 +377,8 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
         v60 = int(vel.get("count_last_60m", 0))
         signals = {
             "known_recipient": bool(is_known),
-            "new_recipient": (not is_known) and bool(merchant),
+            "new_recipient": (not is_known) and bool(recipient_key) and recipient_key != "unknown_recipient",
+            "recipient_key": recipient_key,  # For debugging
             "amount_deviation_from_known": deviation_ratio,
             "amount_deviation_flag": deviation_ratio is not None and deviation_ratio >= 1.5,
             "off_hours": bool(off_hours),
