@@ -145,7 +145,8 @@ async def trigger_risk_analysis(transaction: dict):
         # Prefer external AI service (risk-scorer) to get score + rationale
         try:
             risk_scorer_url = os.getenv("RISK_SCORER_URL", "http://risk-scorer.fraudguard.svc.cluster.local:8080")
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # Allow more time for Vertex-backed analysis and surface error details
+            async with httpx.AsyncClient(timeout=25.0) as client:
                 response = await client.post(
                     f"{risk_scorer_url}/analyze",
                     json=transaction
@@ -157,9 +158,12 @@ async def trigger_risk_analysis(transaction: dict):
                 else:
                     logger.warning("risk_scorer_non_200", status_code=response.status_code, body=response.text)
         except Exception as external_error:
-            logger.warning("external_risk_analysis_failed",
-                           transaction_id=transaction.get("transaction_id"),
-                           error=str(external_error))
+            logger.warning(
+                "external_risk_analysis_failed",
+                transaction_id=transaction.get("transaction_id"),
+                error_type=type(external_error).__name__,
+                error=str(external_error)
+            )
 
         # Fallback to internal heuristic scoring if needed
         if not risk_explanation:
