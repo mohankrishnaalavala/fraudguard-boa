@@ -1202,8 +1202,16 @@ async def analyze_transaction(transaction: Transaction):
             rationale_val = f"Heuristic fallback: {h_reason}"
 
         # Prefer baseline historical rationale when available (ensures intelligent context)
-        if baseline_rationale and (not rationale_val or "standard transaction pattern" in str(rationale_val).lower()):
-            rationale_val = baseline_rationale
+        if baseline_rationale:
+            rv = str(rationale_val or "").lower()
+            generic = (
+                ("standard transaction pattern" in rv) or
+                ("medium amount" in rv) or
+                ("model response unavailable" in rv) or
+                ("heuristic fallback" in rv)
+            )
+            if (not rationale_val) or generic:
+                rationale_val = baseline_rationale
 
         # Create risk score response
         risk_score = RiskScore(
