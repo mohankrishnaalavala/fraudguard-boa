@@ -728,9 +728,9 @@ async def call_gemini_api(prompt: str) -> dict:
     try:
         # If neither OAuth nor API key available, use intelligent mock for demo
         if (not GEMINI_API_KEY or GEMINI_API_KEY == "PLACEHOLDER_GEMINI_API_KEY") and not FORCE_GL_OAUTH:
-            logger.info("using_mock_gemini_response")
+            logger.info("using_enhanced_mock_with_historical_analysis")
 
-            # Intelligent rule-based mock scoring for demo
+            # Enhanced intelligent mock that uses historical context from prompt
             import re
 
             # Extract transaction details from prompt for intelligent analysis
@@ -740,17 +740,55 @@ async def call_gemini_api(prompt: str) -> dict:
             merchant_match = re.search(r'"merchant":\s*"([^"]*)"', prompt)
             merchant = merchant_match.group(1) if merchant_match else ""
 
-            time_match = re.search(r'"timestamp":\s*"([^"]*)"', prompt)
-            timestamp = time_match.group(1) if time_match else ""
+            # Extract historical context from enhanced prompt
+            historical_context = ""
+            if "HISTORICAL ANALYSIS:" in prompt:
+                hist_match = re.search(r'HISTORICAL ANALYSIS: ([^\\n]+)', prompt)
+                if hist_match:
+                    historical_context = hist_match.group(1)
+            elif "ACCOUNT ANALYSIS:" in prompt:
+                hist_match = re.search(r'ACCOUNT ANALYSIS: ([^\\n]+)', prompt)
+                if hist_match:
+                    historical_context = hist_match.group(1)
 
-            # Intelligent risk scoring based on patterns
+            # Extract pattern signals for intelligent analysis
+            known_recipient = "known_recipient.*true" in prompt
+
+            # Intelligent risk scoring based on historical patterns
             risk_score = 0.1  # Base risk
             risk_factors = []
 
-            # Amount-based risk
-            if amount > 1000:
-                risk_score += 0.4
-                risk_factors.append(f"High amount transaction (${amount})")
+            # Historical analysis-based scoring
+            if historical_context:
+                if "typical amount" in historical_context and "is" in historical_context and "x" in historical_context:
+                    # Extract deviation ratio from historical context
+                    ratio_match = re.search(r'(\d+\.?\d*)x', historical_context)
+                    if ratio_match:
+                        deviation_ratio = float(ratio_match.group(1))
+                        if deviation_ratio >= 3.0:
+                            risk_score += 0.5
+                            risk_factors.append(f"Amount is {deviation_ratio}x higher than historical pattern")
+                        elif deviation_ratio >= 2.0:
+                            risk_score += 0.3
+                            risk_factors.append(f"Amount is {deviation_ratio}x higher than typical")
+                        elif deviation_ratio <= 0.5:
+                            risk_score -= 0.1
+                            risk_factors.append("Amount consistent with historical pattern")
+
+            # Recipient analysis
+            if known_recipient:
+                if not risk_factors:  # No historical deviation detected
+                    risk_score = max(0.05, risk_score - 0.1)
+                    risk_factors.append("Known recipient with consistent transaction pattern")
+            else:
+                risk_score += 0.2
+                risk_factors.append("New recipient - first transaction to this account")
+
+            # Amount-based risk (fallback if no historical context)
+            if not historical_context:
+                if amount > 1000:
+                    risk_score += 0.4
+                    risk_factors.append(f"High amount transaction (${amount})")
             elif amount > 500:
                 risk_score += 0.2
                 risk_factors.append(f"Medium amount transaction (${amount})")
@@ -778,8 +816,18 @@ async def call_gemini_api(prompt: str) -> dict:
             risk_score = min(risk_score, 0.95)
             risk_score = max(risk_score, 0.05)
 
-            # Generate rationale
-            if risk_score > 0.7:
+            # Generate intelligent rationale based on analysis
+            if historical_context and risk_factors:
+                # Use historical context for explanation
+                primary_factor = risk_factors[0] if risk_factors else "Transaction analysis"
+                if known_recipient:
+                    if "higher than" in primary_factor:
+                        rationale = f"Known recipient account with unusual transaction pattern. {primary_factor}. This deviation from typical spending behavior warrants investigation."
+                    else:
+                        rationale = f"Known recipient account with {primary_factor.lower()}. Transaction appears consistent with established patterns."
+                else:
+                    rationale = f"New recipient account. {primary_factor}. First-time transactions to new recipients require additional verification."
+            elif risk_score > 0.7:
                 rationale = f"HIGH RISK: {', '.join(risk_factors[:3])}"
             elif risk_score > 0.4:
                 rationale = f"MEDIUM RISK: {', '.join(risk_factors[:2])}"
