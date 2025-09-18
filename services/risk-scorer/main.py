@@ -1094,6 +1094,16 @@ async def analyze_transaction(transaction: Transaction):
         pattern_signals = analyze_pattern_signals(tx_payload, rag_summary)
         prompt = build_vertex_prompt(tx_payload, rag_summary, pattern_signals)
 
+        # Debug logging for enhanced prompting
+        logger.info(
+            "enhanced_prompt_debug",
+            transaction_id=transaction.transaction_id,
+            history_count=len(history),
+            rag_recipients=len(rag_summary.get("known_recipients", [])),
+            prompt_contains_historical="HISTORICAL ANALYSIS:" in prompt,
+            prompt_preview=prompt[:200] + "..." if len(prompt) > 200 else prompt
+        )
+
         # Structured signals (no PII) for debugging and model improvement
         try:
             logger.info(
