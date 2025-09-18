@@ -426,14 +426,44 @@ def heuristic_risk_from_tx(tx: dict) -> tuple[float, str]:
 def build_vertex_prompt(transaction: dict, rag_summary: dict, pattern_signals: dict | None = None) -> str:
     """Construct a Vertex AI prompt with structured context and derived signals."""
     signals_json = json.dumps(pattern_signals or {}, default=str)
+
+    # Extract recipient for historical analysis
+    recipient = transaction.get("merchant", "unknown")
+    amount = float(transaction.get("amount", 0))
+
+    # Build intelligent historical context
+    historical_context = ""
+    if rag_summary.get("known_recipients"):
+        for recip_data in rag_summary["known_recipients"]:
+            if recip_data.get("recipient") == recipient.lower():
+                typical_amount = recip_data.get("typical_amount", 0)
+                count = recip_data.get("count", 0)
+                if typical_amount > 0 and count > 0:
+                    deviation_ratio = amount / typical_amount if typical_amount > 0 else 1.0
+                    historical_context = f"HISTORICAL ANALYSIS: Recipient '{recipient}' has {count} previous transactions with typical amount ${typical_amount:.2f}. Current transaction ${amount:.2f} is {deviation_ratio:.1f}x the typical amount."
+                break
+
+    if not historical_context and rag_summary.get("typical_amount", 0) > 0:
+        account_typical = rag_summary["typical_amount"]
+        deviation_ratio = amount / account_typical if account_typical > 0 else 1.0
+        historical_context = f"ACCOUNT ANALYSIS: Account typical transaction amount is ${account_typical:.2f}. Current transaction ${amount:.2f} is {deviation_ratio:.1f}x the account average."
+
     return (
-        "You are an AI fraud analyst. Analyze the transaction with context. "
+        "You are an AI fraud analyst. Analyze the transaction using historical context and patterns. "
+        "Provide intelligent analysis comparing current transaction against historical data. "
         "Output ONLY a single minified JSON object exactly matching this schema: "
         "{\"risk_score\": number between 0 and 1, \"rationale\": string}. "
-        "No additional text, no explanations, no markdown, no code fences.\n"
-        f"Transaction: {json.dumps(transaction, default=str)}\n"
-        f"Context: {json.dumps(rag_summary, default=str)}\n"
-        f"Signals: {signals_json}\n"
+        "No additional text, no explanations, no markdown, no code fences.\n\n"
+        f"CURRENT TRANSACTION: {json.dumps(transaction, default=str)}\n\n"
+        f"HISTORICAL CONTEXT: {historical_context}\n\n"
+        f"RAG SUMMARY: {json.dumps(rag_summary, default=str)}\n\n"
+        f"PATTERN SIGNALS: {signals_json}\n\n"
+        "ANALYSIS INSTRUCTIONS:\n"
+        "- If recipient has transaction history, compare current amount vs typical amounts\n"
+        "- For known recipients with typical amounts, flag deviations >2x as suspicious\n"
+        "- For new recipients, note this is first transaction to this recipient\n"
+        "- Consider velocity patterns, off-hours activity, and amount deviations\n"
+        "- Provide specific rationale referencing historical patterns when available\n"
         "Guidelines:\n"
         "- Consider known vs new recipients; large deviations from a known recipient's typical amount increase risk.\n"
         "- Detect temporal anomalies: transactions outside common hours and weekend late-night.\n"

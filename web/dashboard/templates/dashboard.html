@@ -171,40 +171,116 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Simple auto-refresh functionality
-        document.addEventListener('click', async (e) => {
-                const btn = e.target.closest('.notify-btn');
-                if (!btn) return;
-                const txid = btn.getAttribute('data-txid');
-                const score = parseFloat(btn.getAttribute('data-score') || '0');
-                const expl = btn.getAttribute('data-expl') || 'Suspicious activity detected';
-                btn.disabled = true;
-                btn.textContent = 'Notifying...';
-                try {
-                    const resp = await fetch('/api/notify', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ transaction_id: txid, risk_score: score, explanation: expl })
-                    });
-                    if (resp.ok) {
-                        btn.textContent = 'Notified ✅';
-                        btn.classList.remove('btn-outline-primary');
-                        btn.classList.add('btn-success');
-                    } else {
-                        btn.textContent = 'Failed ❌';
-                        btn.classList.remove('btn-outline-primary');
-                        btn.classList.add('btn-danger');
-                        setTimeout(() => { btn.textContent = 'Notify User'; btn.classList.add('btn-outline-primary'); btn.classList.remove('btn-danger'); btn.disabled = false; }, 2000);
-                    }
-                } catch (err) {
-                    btn.textContent = 'Error ❌';
-                    setTimeout(() => { btn.textContent = 'Notify User'; btn.disabled = false; }, 2000);
-                }
-            });
+        // Dynamic dashboard updates
+        let refreshInterval = {{ refresh_interval }};
+        let lastUpdateTime = Date.now();
 
+        // Update metrics dynamically
+        async function updateMetrics() {
+            try {
+                const response = await fetch('/api/stats');
+                if (response.ok) {
+                    const stats = await response.json();
+
+                    // Update metric cards
+                    document.querySelector('.high-risk .card-text').textContent = stats.high_risk || 0;
+                    document.querySelector('.medium-risk .card-text').textContent = stats.medium_risk || 0;
+                    document.querySelector('.low-risk .card-text').textContent = stats.low_risk || 0;
+                    document.querySelector('.normal .card-text').textContent = stats.normal || 0;
+
+                    console.log('Metrics updated:', stats);
+                }
+            } catch (error) {
+                console.error('Failed to update metrics:', error);
+            }
+        }
+
+        // Update transactions table
+        async function updateTransactions() {
+            try {
+                const response = await fetch('/api/records');
+                if (response.ok) {
+                    const transactions = await response.json();
+
+                    // Update transaction table
+                    const tbody = document.querySelector('tbody');
+                    if (tbody && transactions.length > 0) {
+                        let html = '';
+                        transactions.slice(0, 10).forEach(txn => {
+                            const riskBadge = txn.risk_level === 'high' ? '🚨 High Risk' :
+                                            txn.risk_level === 'medium' ? '⚠️ Medium Risk' :
+                                            txn.risk_level === 'low' ? '⚡ Low Risk' : '✅ Normal';
+
+                            html += `
+                                <tr>
+                                    <td><span class="badge bg-secondary">${txn.transaction_id}</span></td>
+                                    <td>${riskBadge}</td>
+                                    <td class="explanation-cell">
+                                        <div><strong>$${parseFloat(txn.amount || 0).toFixed(2)}</strong> at ${txn.merchant || 'Unknown'}</div>
+                                        <small class="text-muted">${txn.risk_explanation || 'No AI rationale available'}</small>
+                                    </td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary notify-btn"
+                                                data-txid="${txn.transaction_id}"
+                                                data-score="${txn.risk_score || 0}"
+                                                data-expl="${txn.risk_explanation || ''}">
+                                            Notify User
+                                        </button>
+                                    </td>
+                                </tr>
+                            `;
+                        });
+                        tbody.innerHTML = html;
+                    }
+
+                    console.log('Transactions updated:', transactions.length);
+                }
+            } catch (error) {
+                console.error('Failed to update transactions:', error);
+            }
+        }
+
+        // Notify button functionality
+        document.addEventListener('click', async (e) => {
+            const btn = e.target.closest('.notify-btn');
+            if (!btn) return;
+            const txid = btn.getAttribute('data-txid');
+            const score = parseFloat(btn.getAttribute('data-score') || '0');
+            const expl = btn.getAttribute('data-expl') || 'Suspicious activity detected';
+            btn.disabled = true;
+            btn.textContent = 'Notifying...';
+            try {
+                const resp = await fetch('/api/notify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transaction_id: txid, risk_score: score, explanation: expl })
+                });
+                if (resp.ok) {
+                    btn.textContent = 'Notified ✅';
+                    btn.classList.remove('btn-outline-primary');
+                    btn.classList.add('btn-success');
+                } else {
+                    btn.textContent = 'Failed ❌';
+                    btn.classList.remove('btn-outline-primary');
+                    btn.classList.add('btn-danger');
+                    setTimeout(() => { btn.textContent = 'Notify User'; btn.classList.add('btn-outline-primary'); btn.classList.remove('btn-danger'); btn.disabled = false; }, 2000);
+                }
+            } catch (err) {
+                btn.textContent = 'Error ❌';
+                setTimeout(() => { btn.textContent = 'Notify User'; btn.disabled = false; }, 2000);
+            }
+        });
+
+        // Start dynamic updates
+        setInterval(async () => {
+            await updateMetrics();
+            await updateTransactions();
+        }, 5000); // Update every 5 seconds
+
+        // Fallback full page refresh
         setTimeout(function() {
             window.location.reload();
-        }, {{ refresh_interval }});
+        }, refreshInterval);
     </script>
 </body>
 </html>
