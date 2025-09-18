@@ -1104,6 +1104,25 @@ async def analyze_transaction(transaction: Transaction):
             prompt_preview=prompt[:200] + "..." if len(prompt) > 200 else prompt
         )
 
+        # Build baseline historical rationale (even if AI falls back)
+        baseline_rationale = None
+        try:
+            recipient_key = str(tx_payload.get("merchant") or "").lower()
+            amount_val = float(tx_payload.get("amount") or 0)
+            for recip in rag_summary.get("known_recipients", []):
+                if str(recip.get("recipient", "")).lower() == recipient_key:
+                    typical = float(recip.get("typical_amount") or 0)
+                    count = int(recip.get("count") or 0)
+                    if typical > 0 and count > 0:
+                        ratio = amount_val / typical if typical > 0 else 1.0
+                        baseline_rationale = (
+                            f"Known recipient {recipient_key} with {count} prior txns (typical ${typical:.2f}). "
+                            f"Current ${amount_val:.2f} is {ratio:.1f}x typical."
+                        )
+                        break
+        except Exception:
+            baseline_rationale = None
+
         # Structured signals (no PII) for debugging and model improvement
         try:
             logger.info(
@@ -1181,6 +1200,10 @@ async def analyze_transaction(transaction: Transaction):
             h_score, h_reason = heuristic_risk_from_tx(tx_payload)
             score_val = h_score
             rationale_val = f"Heuristic fallback: {h_reason}"
+
+        # Prefer baseline historical rationale when available (ensures intelligent context)
+        if baseline_rationale and (not rationale_val or "standard transaction pattern" in str(rationale_val).lower()):
+            rationale_val = baseline_rationale
 
         # Create risk score response
         risk_score = RiskScore(
