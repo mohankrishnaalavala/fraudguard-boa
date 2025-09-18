@@ -195,40 +195,48 @@
             }
         }
 
-        // Update transactions table
+        // Update transactions table (match the 6-column layout)
         async function updateTransactions() {
             try {
                 const response = await fetch('/api/records');
                 if (response.ok) {
                     const transactions = await response.json();
 
-                    // Update transaction table
-                    const tbody = document.querySelector('tbody');
-                    if (tbody && transactions.length > 0) {
+                    const tbody = document.querySelector('#transactions-table tbody');
+                    if (tbody) {
                         let html = '';
-                        transactions.slice(0, 10).forEach(txn => {
-                            const riskBadge = txn.risk_level === 'high' ? '🚨 High Risk' :
-                                            txn.risk_level === 'medium' ? '⚠️ Medium Risk' :
-                                            txn.risk_level === 'low' ? '⚡ Low Risk' : '✅ Normal';
+                        transactions.slice(0, 20).forEach(txn => {
+                            const score = parseFloat(txn.risk_score || 0);
+                            const riskColor = score >= 0.8 ? 'danger' : (score >= 0.6 ? 'warning' : (score >= 0.3 ? 'info' : 'success'));
+                            const riskPct = Math.round(score * 100);
+                            const riskLevel = (txn.risk_level || '').toLowerCase();
+                            const actionText = riskLevel === 'high' ? '🚨 High Risk' : riskLevel === 'medium' ? '⚠️ Medium Risk' : riskLevel === 'low' ? '⚡ Low Risk' : '✅ Normal';
+                            const label = txn.label || txn.merchant || 'Unknown';
+
+                            let timeHtml = 'Unknown';
+                            if (txn.formatted_time || txn.formatted_date) {
+                                timeHtml = `<div>${txn.formatted_time || 'Unknown'}</div><small class="text-muted">${txn.formatted_date || 'Unknown'}</small>`;
+                            }
 
                             html += `
                                 <tr>
-                                    <td><span class="badge bg-secondary">${txn.transaction_id}</span></td>
-                                    <td>${riskBadge}</td>
+                                    <td>${timeHtml}</td>
+                                    <td><code>${txn.transaction_id}</code></td>
+                                    <td><span class="badge bg-${riskColor} risk-score">${riskPct}%</span></td>
+                                    <td>${actionText}</td>
                                     <td class="explanation-cell">
-                                        <div><strong>$${parseFloat(txn.amount || 0).toFixed(2)}</strong> at ${txn.merchant || 'Unknown'}</div>
+                                        <div><strong>$${parseFloat(txn.amount || 0).toFixed(2)}</strong> at ${label}</div>
                                         <small class="text-muted">${txn.risk_explanation || 'No AI rationale available'}</small>
                                     </td>
                                     <td>
                                         <button class="btn btn-sm btn-outline-primary notify-btn"
                                                 data-txid="${txn.transaction_id}"
-                                                data-score="${txn.risk_score || 0}"
+                                                data-score="${score}"
                                                 data-expl="${txn.risk_explanation || ''}">
                                             Notify User
                                         </button>
                                     </td>
-                                </tr>
-                            `;
+                                </tr>`;
                         });
                         tbody.innerHTML = html;
                     }
@@ -277,10 +285,8 @@
             await updateTransactions();
         }, 5000); // Update every 5 seconds
 
-        // Fallback full page refresh
-        setTimeout(function() {
-            window.location.reload();
-        }, refreshInterval);
+        // Disable full page reload to prevent layout flicker; rely on AJAX updates only.
+        // setTimeout(function() { window.location.reload(); }, refreshInterval);
     </script>
 </body>
 </html>

@@ -135,23 +135,24 @@ def _decode_jwt_noverify(token: str) -> dict:
 
 
 def create_risk_analysis_prompt(transaction: Transaction) -> str:
-    """Create a privacy-safe prompt for Gemini analysis"""
-    # Remove PII and create compact features
+    """Create a privacy-safe prompt using only Bank of Anthos fields."""
+    # Map gateway fields to BoA-aligned feature names
+    label = getattr(transaction, "label", None) or transaction.merchant
+    tx_type = getattr(transaction, "type", None) or "unknown"
     prompt = f"""
 Analyze this transaction for fraud risk. Return a JSON response with risk_score (0.0-1.0) and rationale.
 
-Transaction Features:
+Use only these fields for analysis (no category, merchant-type, or location):
 - Amount: ${transaction.amount:.2f}
-- Category: {transaction.category}
-- Merchant Type: {transaction.merchant.split('_')[0] if '_' in transaction.merchant else 'unknown'}
-- Time: {transaction.timestamp.strftime('%H:%M')} on {transaction.timestamp.strftime('%A')}
-- Location: {transaction.location or 'unknown'}
+- Account ID: {transaction.account_id}
+- Label: {label}
+- Type: {tx_type}
+- Timestamp: {transaction.timestamp.isoformat()}
 
-Consider these fraud indicators:
-- Unusual amounts for category
-- Off-hours transactions
-- High-risk merchant types
-- Geographic anomalies
+Consider these fraud indicators strictly from the above fields:
+- Amount patterns vs past for the same label (recipient) and account
+- Repeated amounts to the same label
+- Temporal patterns (time-of-day, weekday/weekend), and velocity bursts
 
 Respond ONLY with a single JSON object: {{"risk_score": number between 0 and 1, "rationale": string}}
 """
@@ -239,7 +240,9 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
     seen = set()
     deduped = []
     for tx in combined:
-        key = (str(tx.get("timestamp")), str(tx.get("amount")), str(tx.get("merchant", "")))
+        # Dedup by timestamp+amount+label/merchant
+        label = str(tx.get("label") or tx.get("merchant", ""))
+        key = (str(tx.get("timestamp")), str(tx.get("amount")), label)
         if key in seen:
             continue
         seen.add(key)
@@ -249,23 +252,19 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
     return deduped[:limit]
 
 def extract_recipient_key(transaction: dict) -> str:
-    """Extract a consistent recipient key from transaction data.
+    """Extract a consistent recipient key using BoA-aligned fields.
 
-    For account-to-account transfers: use the account number (acct:XXXXX)
-    For merchant transactions: use the merchant name
-    This ensures proper recipient recognition across different transaction types.
+    Prefer 'label' (BoA label/description). Fallback to 'merchant'.
+    If either starts with 'acct:' treat it as recipient account key.
     """
+    label = str(transaction.get("label") or "").strip()
     merchant = str(transaction.get("merchant") or "").strip()
 
-    # For account transfers, the merchant field contains the recipient account
-    if merchant.startswith("acct:"):
-        return merchant.lower()
-
-    # For regular merchant transactions, use merchant name
-    if merchant:
-        return merchant.lower()
-
-    # Fallback for transactions without clear recipient
+    candidate = label or merchant
+    if candidate.startswith("acct:"):
+        return candidate.lower()
+    if candidate:
+        return candidate.lower()
     return "unknown_recipient"
 
 def summarize_history_for_rag(history: list[dict]) -> dict:
@@ -398,25 +397,19 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
 def heuristic_risk_from_tx(tx: dict) -> tuple[float, str]:
     try:
         amount = float(tx.get("amount", 0))
-        merchant = str(tx.get("merchant", "")).lower()
         ts = str(tx.get("timestamp", ""))
         risk = 0.1
         reasons = []
+        # Amount-based risk only (no merchant/category/location assumptions)
         if amount > 2000:
             risk += 0.5; reasons.append(f"High amount ${amount}")
         elif amount > 1000:
             risk += 0.4; reasons.append(f"Large amount ${amount}")
         elif amount > 500:
             risk += 0.2; reasons.append(f"Medium amount ${amount}")
-        for kw in ["suspicious","unknown","cash","atm","foreign","advance"]:
-            if kw in merchant:
-                risk += 0.3; reasons.append("Suspicious merchant type"); break
-        if any(x in ts for x in ["T01:","T02:","T03:"]):
+        # Temporal signal (late night)
+        if any(x in ts for x in ["T01:", "T02:", "T03:"]):
             risk += 0.2; reasons.append("Late night activity")
-        if "electronics" in merchant:
-            risk += 0.1; reasons.append("Electronics merchant")
-        if any(w in merchant for w in ["coffee","restaurant","cafe"]):
-            risk -= 0.1; reasons.append("Common merchant")
         risk = min(max(risk, 0.05), 0.95)
         rationale = "; ".join(reasons) or "Standard transaction pattern"
         return round(risk, 2), rationale
@@ -424,55 +417,62 @@ def heuristic_risk_from_tx(tx: dict) -> tuple[float, str]:
         return 0.5, "Heuristic fallback due to error"
 
 def build_vertex_prompt(transaction: dict, rag_summary: dict, pattern_signals: dict | None = None) -> str:
-    """Construct a Vertex AI prompt with structured context and derived signals."""
+    """Construct a Vertex AI prompt using only BoA fields and derived signals."""
     signals_json = json.dumps(pattern_signals or {}, default=str)
 
-    # Extract recipient for historical analysis
-    recipient = transaction.get("merchant", "unknown")
+    # Normalize BoA-aligned features
+    label = transaction.get("label") or transaction.get("merchant", "unknown")
     amount = float(transaction.get("amount", 0))
+    tx_type = transaction.get("type", "unknown")
 
-    # Build intelligent historical context
+    # Build intelligent historical context (recipient == label)
     historical_context = ""
     if rag_summary.get("known_recipients"):
         for recip_data in rag_summary["known_recipients"]:
-            if recip_data.get("recipient") == recipient.lower():
-                typical_amount = recip_data.get("typical_amount", 0)
-                count = recip_data.get("count", 0)
+            if str(recip_data.get("recipient", "")).lower() == str(label).lower():
+                typical_amount = float(recip_data.get("typical_amount", 0) or 0)
+                count = int(recip_data.get("count", 0) or 0)
                 if typical_amount > 0 and count > 0:
                     deviation_ratio = amount / typical_amount if typical_amount > 0 else 1.0
-                    historical_context = f"HISTORICAL ANALYSIS: Recipient '{recipient}' has {count} previous transactions with typical amount ${typical_amount:.2f}. Current transaction ${amount:.2f} is {deviation_ratio:.1f}x the typical amount."
+                    historical_context = (
+                        f"HISTORICAL ANALYSIS: Label '{label}' has {count} prior txns with typical ${typical_amount:.2f}. "
+                        f"Current ${amount:.2f} is {deviation_ratio:.1f}x typical."
+                    )
                 break
 
-    if not historical_context and rag_summary.get("typical_amount", 0) > 0:
-        account_typical = rag_summary["typical_amount"]
+    if not historical_context and float(rag_summary.get("typical_amount", 0) or 0) > 0:
+        account_typical = float(rag_summary["typical_amount"])
         deviation_ratio = amount / account_typical if account_typical > 0 else 1.0
-        historical_context = f"ACCOUNT ANALYSIS: Account typical transaction amount is ${account_typical:.2f}. Current transaction ${amount:.2f} is {deviation_ratio:.1f}x the account average."
+        historical_context = (
+            f"ACCOUNT ANALYSIS: Account typical is ${account_typical:.2f}. Current ${amount:.2f} is {deviation_ratio:.1f}x account typical."
+        )
+
+    # Provide a sanitized current transaction payload limited to allowed fields
+    sanitized_current = {
+        "transaction_id": transaction.get("transaction_id"),
+        "account_id": transaction.get("account_id"),
+        "amount": amount,
+        "label": label,
+        "type": tx_type,
+        "timestamp": transaction.get("timestamp"),
+    }
 
     return (
-        "You are an AI fraud analyst. Analyze the transaction using historical context and patterns. "
-        "Provide intelligent analysis comparing current transaction against historical data. "
+        "You are an AI fraud analyst. Analyze this Bank of Anthos transaction using historical context and patterns. "
+        "Only use these fields: amount, account_id, label, type, timestamp. Do not use category, merchant type, or location. "
         "Output ONLY a single minified JSON object exactly matching this schema: "
         "{\"risk_score\": number between 0 and 1, \"rationale\": string}. "
         "No additional text, no explanations, no markdown, no code fences.\n\n"
-        f"CURRENT TRANSACTION: {json.dumps(transaction, default=str)}\n\n"
+        f"CURRENT TRANSACTION: {json.dumps(sanitized_current, default=str)}\n\n"
         f"HISTORICAL CONTEXT: {historical_context}\n\n"
         f"RAG SUMMARY: {json.dumps(rag_summary, default=str)}\n\n"
         f"PATTERN SIGNALS: {signals_json}\n\n"
         "ANALYSIS INSTRUCTIONS:\n"
-        "- If recipient has transaction history, compare current amount vs typical amounts\n"
-        "- For known recipients with typical amounts, flag deviations >2x as suspicious\n"
-        "- For new recipients, note this is first transaction to this recipient\n"
-        "- Consider velocity patterns, off-hours activity, and amount deviations\n"
-        "- Provide specific rationale referencing historical patterns when available\n"
-        "Guidelines:\n"
-        "- Consider known vs new recipients; large deviations from a known recipient's typical amount increase risk.\n"
-        "- Detect temporal anomalies: transactions outside common hours and weekend late-night.\n"
-        "- Incorporate velocity: multiple recent transactions (>=3 in 15m or >=5 in 60m) elevate risk.\n"
-        "- Weigh amount relative to typical amount for the account and recipient, not absolute only.\n"
-        "- Keep rationale concise and reference which factors (new recipient, amount deviation, off-hours, velocity).\n"
-        "- If recipient is known with typical high amount (e.g., $1500), lower risk.\n"
-        "- Consider unusual time (02:00-04:00) and deviation from typical amounts.\n"
-        "- Consider recent frequency bursts. Keep rationale concise (<200 chars)."
+        "- If the label (recipient) has history, compare current amount vs typical for that label.\n"
+        "- Flag deviations >2x from the label's typical as suspicious; note repeated equal amounts.\n"
+        "- Consider account-level typical when label history is insufficient.\n"
+        "- Consider velocity (>=3 in 15m or >=5 in 60m) and off-hours time-of-day.\n"
+        "- Provide a concise rationale referencing these specific factors only."
     )
 
 async def call_vertex_ai(prompt: str) -> dict:
@@ -1069,8 +1069,7 @@ async def analyze_transaction(transaction: Transaction):
         logger.info(
             "risk_analysis_started",
             transaction_id=transaction.transaction_id,
-            amount=transaction.amount,
-            category=transaction.category
+            amount=transaction.amount
         )
 
         # RAG: fetch and summarize account history
@@ -1082,14 +1081,15 @@ async def analyze_transaction(transaction: Transaction):
             rag_summary = {"known_recipients": [], "typical_amount": 0, "common_hours": [], "history_count": 0}
 
         # Build Vertex prompt with RAG context
+        # BoA-aligned payload (restrict to allowed fields)
+        label = getattr(transaction, "label", None) or transaction.merchant
         tx_payload = {
             "transaction_id": transaction.transaction_id,
             "account_id": transaction.account_id,
             "amount": transaction.amount,
-            "merchant": transaction.merchant,
-            "category": transaction.category,
+            "label": label,
+            "type": getattr(transaction, "type", None) or "unknown",
             "timestamp": transaction.timestamp.isoformat(),
-            "location": transaction.location,
         }
         pattern_signals = analyze_pattern_signals(tx_payload, rag_summary)
         prompt = build_vertex_prompt(tx_payload, rag_summary, pattern_signals)
@@ -1107,7 +1107,7 @@ async def analyze_transaction(transaction: Transaction):
         # Build baseline historical rationale (even if AI falls back)
         baseline_rationale = None
         try:
-            recipient_key = str(tx_payload.get("merchant") or "").lower()
+            recipient_key = str(tx_payload.get("label") or "").lower()
             amount_val = float(tx_payload.get("amount") or 0)
             for recip in rag_summary.get("known_recipients", []):
                 if str(recip.get("recipient", "")).lower() == recipient_key:
