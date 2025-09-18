@@ -61,7 +61,7 @@ networkPolicy:
     - to:
         - namespaceSelector:
             matchLabels:
-              name: boa
+              kubernetes.io/metadata.name: boa
       ports:
         - protocol: TCP
           port: 80
@@ -71,7 +71,7 @@ networkPolicy:
     - to:
         - namespaceSelector:
             matchLabels:
-              name: fraudguard
+              kubernetes.io/metadata.name: fraudguard
       ports:
         - protocol: TCP
           port: 8080
@@ -85,7 +85,7 @@ networkPolicy:
     - from:
         - namespaceSelector:
             matchLabels:
-              name: fraudguard
+              kubernetes.io/metadata.name: fraudguard
       ports:
         - protocol: TCP
           port: 8080

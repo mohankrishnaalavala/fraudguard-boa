@@ -518,7 +518,59 @@ async def get_all_recent_transactions(
     limit: int = 20,
     client_ip: str = Depends(get_client_ip)
 ):
-    """Get all recent transactions across all accounts for dashboard"""
+    """Get all recent transactions across all accounts for dashboard.
+    Returns: {"transactions": [...]} with newest first.
+    """
+    # Rate limit
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    # Clamp limit defensively (dashboard uses default 20)
+    try:
+        limit = max(1, min(int(limit), 50))
+    except Exception:
+        limit = 20
+
+    try:
+        with db_lock:
+            with sqlite3.connect(DATABASE_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT transaction_id, account_id, amount, merchant, category,
+                           timestamp, location, risk_score, risk_level, risk_explanation, created_at
+                    FROM transactions
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                )
+                rows = cursor.fetchall()
+
+        transactions = []
+        for row in rows:
+            txn = {
+                "transaction_id": row["transaction_id"],
+                "account_id": row["account_id"],
+                "amount": row["amount"],
+                "merchant": row["merchant"],
+                "category": row["category"],
+                "timestamp": row["timestamp"],
+                "location": row["location"],
+                "risk_score": row["risk_score"],
+                "risk_level": row["risk_level"] or "pending",
+                "risk_explanation": row["risk_explanation"],
+                "created_at": row["created_at"],
+            }
+            transactions.append(txn)
+
+        logger.info("recent_transactions_retrieved", count=len(transactions))
+        return {"transactions": transactions}
+
+    except Exception as e:
+        logger.error("recent_transactions_failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/mcp/schema")
 async def mcp_schema():
@@ -574,44 +626,6 @@ async def mcp_analyze(body: dict, client_ip: str = Depends(get_client_ip)):
         logger.error("mcp_analyze_failed", error=str(e))
         raise HTTPException(status_code=500, detail="Analyze forwarding failed")
 
-    if not check_rate_limit(client_ip):
-        logger.warning("rate_limit_exceeded", client_ip=client_ip)
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
-    try:
-        with db_lock:
-            with sqlite3.connect(DATABASE_PATH) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
-                    SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level, risk_explanation, created_at
-                    FROM transactions
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                """, (limit,))
-
-                transactions = []
-                for row in cursor.fetchall():
-                    transactions.append({
-                        "transaction_id": row["transaction_id"],
-                        "account_id": row["account_id"],
-                        "amount": row["amount"],
-                        "merchant": row["merchant"],
-                        "category": row["category"],
-                        "timestamp": row["timestamp"],
-                        "location": row["location"],
-                        "risk_score": row["risk_score"],
-                        "risk_level": row["risk_level"] or "pending",
-                        "risk_explanation": row["risk_explanation"],
-                        "created_at": row["created_at"]
-                    })
-
-                logger.info("recent_transactions_retrieved", count=len(transactions))
-                return {"transactions": transactions}
-
-    except Exception as e:
-        logger.error("recent_transactions_failed", error=str(e))
-        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.on_event("startup")
 async def startup_event():
