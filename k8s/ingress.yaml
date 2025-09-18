@@ -9,10 +9,6 @@ metadata:
     networking.gke.io/managed-certificates: "fraudguard-ssl-cert"
     kubernetes.io/ingress.allow-http: "true"
 spec:
-  tls:
-  - hosts:
-    - fraudguard.mohankrishna.site
-    secretName: fraudguard-ssl-cert
   rules:
   - host: fraudguard.mohankrishna.site
     http:
@@ -76,7 +72,8 @@ spec:
     targetPort: 8080
     protocol: TCP
   selector:
-    app: dashboard
+    app.kubernetes.io/instance: dashboard
+    app.kubernetes.io/name: dashboard
 ---
 apiVersion: v1
 kind: Service
@@ -92,4 +89,5 @@ spec:
     targetPort: 8080
     protocol: TCP
   selector:
-    app: mcp-gateway
+    app.kubernetes.io/instance: mcp-gateway
+    app.kubernetes.io/name: mcp-gateway
