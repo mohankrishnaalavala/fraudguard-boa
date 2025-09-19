@@ -39,8 +39,10 @@ container:
     - name: BOA_HISTORY_URL
       value: "http://transactionhistory.boa.svc.cluster.local:8080"
   envFrom:
-    - name: risk-scorer-gemini
-    - name: boa-api-credentials
+    - secretRef:
+        name: risk-scorer-gemini
+    - secretRef:
+        name: boa-api-credentials
 
 # Give the container more startup time before readiness/liveness kick in
 startupProbe:

@@ -35,7 +35,8 @@ container:
     - name: BOA_HISTORY_URL
       value: "http://transactionhistory.boa.svc.cluster.local:8080"
   envFrom:
-    - name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret
+    - secretRef:
+        name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret
 
 livenessProbe:
   httpGet:
