@@ -203,9 +203,9 @@ def dashboard():
     try:
         transactions = fetch_transactions()
 
-        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0, "normal": 0}
+        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0}
         for txn in transactions:
-            risk_level = str(txn.get("risk_level", "normal")).lower()
+            risk_level = str(txn.get("risk_level", "")).lower()
             if risk_level == "high":
                 stats["high_risk"] += 1
             elif risk_level == "medium":
@@ -213,7 +213,8 @@ def dashboard():
             elif risk_level == "low":
                 stats["low_risk"] += 1
             else:
-                stats["normal"] += 1
+                # default any other value into low to maintain tri-level classification
+                stats["low_risk"] += 1
 
         current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         return render_template(
@@ -242,9 +243,9 @@ def api_stats():
     """API endpoint for fetching dashboard statistics"""
     try:
         transactions = fetch_transactions()
-        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0, "normal": 0, "total": len(transactions)}
+        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0, "total": len(transactions)}
         for txn in transactions:
-            risk_level = str(txn.get("risk_level", "normal")).lower()
+            risk_level = str(txn.get("risk_level", "")).lower()
             if risk_level == "high":
                 stats["high_risk"] += 1
             elif risk_level == "medium":
@@ -252,7 +253,7 @@ def api_stats():
             elif risk_level == "low":
                 stats["low_risk"] += 1
             else:
-                stats["normal"] += 1
+                stats["low_risk"] += 1
         return jsonify(stats)
     except Exception as e:
         logger.error("api_stats_failed", error=str(e))

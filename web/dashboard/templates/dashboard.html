@@ -19,7 +19,6 @@
         .stats-card.high-risk { border-left-color: #dc3545; }
         .stats-card.medium-risk { border-left-color: #ffc107; }
         .stats-card.low-risk { border-left-color: #17a2b8; }
-        .stats-card.normal { border-left-color: #28a745; }
         .auto-refresh {
             position: fixed;
             top: 10px;
@@ -75,14 +74,6 @@
                     </div>
                 </div>
             </div>
-            <div class="col-md-3">
-                <div class="card stats-card normal">
-                    <div class="card-body">
-                        <h5 class="card-title text-success">✅ Normal</h5>
-                        <h2 class="card-text">{{ stats.normal }}</h2>
-                    </div>
-                </div>
-            </div>
         </div>
 
         <!-- Transactions Table -->
@@ -128,7 +119,7 @@
                                             {% elif txn.risk_level == 'low' %}
                                                 ⚡ Low Risk
                                             {% else %}
-                                                ✅ Normal
+                                                ⚡ Low Risk
                                             {% endif %}
                                         </td>
                                         <td class="explanation-cell">
@@ -186,7 +177,6 @@
                     document.querySelector('.high-risk .card-text').textContent = stats.high_risk || 0;
                     document.querySelector('.medium-risk .card-text').textContent = stats.medium_risk || 0;
                     document.querySelector('.low-risk .card-text').textContent = stats.low_risk || 0;
-                    document.querySelector('.normal .card-text').textContent = stats.normal || 0;
 
                     console.log('Metrics updated:', stats);
                 }
@@ -210,7 +200,7 @@
                             const riskColor = score >= 0.8 ? 'danger' : (score >= 0.6 ? 'warning' : (score >= 0.3 ? 'info' : 'success'));
                             const riskPct = Math.round(score * 100);
                             const riskLevel = (txn.risk_level || '').toLowerCase();
-                            const actionText = riskLevel === 'high' ? '🚨 High Risk' : riskLevel === 'medium' ? '⚠️ Medium Risk' : riskLevel === 'low' ? '⚡ Low Risk' : '✅ Normal';
+                            const actionText = riskLevel === 'high' ? '🚨 High Risk' : riskLevel === 'medium' ? '⚠️ Medium Risk' : '⚡ Low Risk';
                             const label = txn.label || txn.merchant || 'Unknown';
 
                             let timeHtml = 'Unknown';

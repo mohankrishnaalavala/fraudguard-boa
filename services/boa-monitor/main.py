@@ -192,12 +192,21 @@ async def forward_to_fraudguard(transaction: Dict) -> bool:
             f"acct:{transaction.get('recipientAccountId')}"
             if transaction.get('recipientAccountId') else transaction.get("description", "Unknown Merchant")
         )
+        # Infer transaction type when not provided by BoA history
+        inferred_type = transaction.get("type")
+        if not inferred_type:
+            acct = transaction.get("accountId")
+            recip = transaction.get("recipientAccountId")
+            # If money is going to a different recipient, it's a debit; otherwise treat as credit
+            inferred_type = "debit" if recip and recip != acct else "credit"
+
         fraudguard_transaction = {
             "transaction_id": transaction_id,
             "amount": abs(float(transaction.get("amount", 0))),  # Use absolute value
             "merchant": merchant_value,
             "user_id": transaction.get("accountId", "unknown_user"),
             "timestamp": transaction.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "type": inferred_type,
             "source": "bank_of_anthos"
         }
 

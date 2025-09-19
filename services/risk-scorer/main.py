@@ -107,6 +107,8 @@ class Transaction(BaseModel):
     category: str = Field(..., description="Transaction category")
     timestamp: datetime = Field(..., description="Transaction timestamp")
     location: Optional[str] = Field(None, description="Transaction location")
+    type: Optional[str] = Field(None, description="Transaction type (debit/credit)")
+    label: Optional[str] = Field(None, description="Recipient label/description")
 
 class RiskScore(BaseModel):
     """Risk score output model"""
@@ -185,6 +187,9 @@ async def fetch_boa_history_for_account(account_id: str, limit: int = 100) -> li
                             "account_id": tx.get("accountId", tx.get("account_id", account_id)),
                             "amount": abs(float(tx.get("amount", 0))),
                             "merchant": tx.get("merchant", f"acct:{tx.get('recipientAccountId', 'unknown')}"),
+                            "label": tx.get("label") or tx.get("merchant") or f"acct:{tx.get('recipientAccountId', 'unknown')}",
+                            "type": tx.get("type"),
+
                             "timestamp": tx.get("timestamp"),
                             "source": "bank_of_anthos"
                         }
@@ -292,6 +297,11 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
 
         try:
             dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            # Normalize to timezone-aware UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
             timestamps.append(dt)
             hours.append(dt.hour)
             weekdays.append(dt.weekday())
@@ -325,8 +335,9 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
 
     # Velocity windows relative to latest timestamp if present, else now
     now_ref = max(timestamps).astimezone(timezone.utc) if timestamps else datetime.now(timezone.utc)
-    count_last_15m = sum(1 for dt in timestamps if (now_ref - dt).total_seconds() <= 15 * 60)
-    count_last_60m = sum(1 for dt in timestamps if (now_ref - dt).total_seconds() <= 60 * 60)
+    # Ensure subtraction between timezone-aware datetimes in UTC
+    count_last_15m = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 15 * 60)
+    count_last_60m = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 60 * 60)
 
     return {
         "known_recipients": top_known[:10],
@@ -472,7 +483,9 @@ def build_vertex_prompt(transaction: dict, rag_summary: dict, pattern_signals: d
         "- Flag deviations >2x from the label's typical as suspicious; note repeated equal amounts.\n"
         "- Consider account-level typical when label history is insufficient.\n"
         "- Consider velocity (>=3 in 15m or >=5 in 60m) and off-hours time-of-day.\n"
-        "- Provide a concise rationale referencing these specific factors only."
+        "- Provide a concise rationale referencing these specific factors only.\n"
+        "- If rag_summary.history_count > 0, explicitly reference historical stats in the rationale (e.g., Known recipient X with N previous transactions averaging $Y).\n"
+        "- Do not claim lack of historical data when history_count > 0; instead, use the provided context."
     )
 
 async def call_vertex_ai(prompt: str) -> dict:
@@ -1122,6 +1135,17 @@ async def analyze_transaction(transaction: Transaction):
                         break
         except Exception:
             baseline_rationale = None
+        # If no recipient-specific baseline, provide overall account baseline when history exists
+        if not baseline_rationale:
+            try:
+                hc = int(rag_summary.get("history_count", 0) or 0)
+                if hc > 0:
+                    typical_overall = float(rag_summary.get("typical_amount", 0) or 0)
+                    baseline_rationale = (
+                        f"History available: {hc} prior transactions overall (typical ${typical_overall:.2f})."
+                    )
+            except Exception:
+                pass
 
         # Structured signals (no PII) for debugging and model improvement
         try:
@@ -1212,6 +1236,21 @@ async def analyze_transaction(transaction: Transaction):
             )
             if (not rationale_val) or generic:
                 rationale_val = baseline_rationale
+        # If AI incorrectly claims no history while we have it, override with baseline
+        rv2 = str(rationale_val or "").lower()
+        misleading_no_history = any(p in rv2 for p in [
+            "without historical data",
+            "lack of historical data",
+            "insufficient data",
+            "no historical data",
+            "without history"
+        ])
+        try:
+            if int(rag_summary.get("history_count", 0) or 0) > 0 and misleading_no_history:
+                if baseline_rationale:
+                    rationale_val = baseline_rationale
+        except Exception:
+            pass
 
         # Create risk score response
         risk_score = RiskScore(

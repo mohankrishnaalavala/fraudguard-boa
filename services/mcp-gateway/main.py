@@ -101,6 +101,9 @@ def init_database():
                 if "risk_explanation" not in cols:
                     conn.execute("ALTER TABLE transactions ADD COLUMN risk_explanation TEXT")
                     logger.info("schema_migrated_add_column", column="risk_explanation")
+                if "tx_type" not in cols:
+                    conn.execute("ALTER TABLE transactions ADD COLUMN tx_type TEXT")
+                    logger.info("schema_migrated_add_column", column="tx_type")
             except Exception as mig_err:
                 logger.warning("schema_migration_failed", error=str(mig_err))
             conn.commit()
@@ -114,10 +117,20 @@ def store_transaction(transaction: dict) -> bool:
     try:
         with db_lock:
             with sqlite3.connect(DATABASE_PATH) as conn:
+                # Normalize/Infer tx_type if missing
+                tx_type = transaction.get("type")
+                if not tx_type:
+                    try:
+                        merch = str(transaction.get("merchant", ""))
+                        if merch.startswith("acct:"):
+                            tx_type = "debit"
+                    except Exception:
+                        tx_type = None
+
                 conn.execute("""
                     INSERT OR REPLACE INTO transactions
-                    (transaction_id, account_id, amount, merchant, category, timestamp, location, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (transaction_id, account_id, amount, merchant, category, timestamp, location, created_at, tx_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     transaction["transaction_id"],
                     transaction.get("account_id", transaction.get("user_id", "unknown")),
@@ -126,7 +139,8 @@ def store_transaction(transaction: dict) -> bool:
                     transaction.get("category", "unknown"),
                     transaction["timestamp"],
                     transaction.get("location"),
-                    datetime.utcnow().isoformat()
+                    datetime.utcnow().isoformat(),
+                    tx_type
                 ))
                 conn.commit()
                 logger.info("transaction_stored", transaction_id=transaction["transaction_id"])
@@ -241,7 +255,7 @@ def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("""
                     SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level, risk_explanation
+                           timestamp, location, risk_score, risk_level, risk_explanation, tx_type
                     FROM transactions
                     WHERE account_id = ?
                     ORDER BY timestamp DESC
@@ -260,7 +274,8 @@ def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
                         "location": row["location"],
                         "risk_score": row["risk_score"],
                         "risk_level": row["risk_level"],
-                        "risk_explanation": row["risk_explanation"]
+                        "risk_explanation": row["risk_explanation"],
+                        "type": row["tx_type"]
                     })
 
                 logger.info("transactions_retrieved", account_id=account_id, count=len(transactions))
@@ -279,6 +294,7 @@ class Transaction(BaseModel):
     category: str = Field(..., description="Transaction category")
     timestamp: datetime = Field(..., description="Transaction timestamp")
     location: Optional[str] = Field(None, description="Transaction location")
+    type: Optional[str] = Field(None, description="Transaction type (debit/credit)")
 
 class TransactionRequest(BaseModel):
     """Transaction creation request"""
@@ -287,6 +303,7 @@ class TransactionRequest(BaseModel):
     merchant: str = Field(..., description="Merchant name")
     user_id: str = Field(..., description="User ID")
     timestamp: datetime = Field(..., description="Transaction timestamp")
+    type: Optional[str] = Field(None, description="Transaction type (debit/credit)")
 
 class Account(BaseModel):
     """Account model"""
@@ -295,7 +312,24 @@ class Account(BaseModel):
     account_type: str = Field(..., description="Account type")
 
 def check_rate_limit(client_ip: str) -> bool:
-    """Simple rate limiting check"""
+    """Simple rate limiting check with internal bypass.
+
+    We bypass rate limiting for internal cluster callers by default to allow
+    service-to-service traffic (e.g., risk-scorer) to aggregate history without
+    tripping 429s. Control via DISABLE_RATE_LIMIT_INTERNAL env var (default true).
+    """
+    # Internal bypass
+    disable_internal_rl = os.getenv("DISABLE_RATE_LIMIT_INTERNAL", "true").lower() == "true"
+    internal_prefixes = (
+        "10.",      # k8s pod CIDR
+        "127.0.0.1", # local
+        "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."
+    )
+    if disable_internal_rl and any(client_ip.startswith(p) for p in internal_prefixes):
+        logger.info("rate_limit_bypass_internal", client_ip=client_ip)
+        return True
+
+    # Token bucket per IP
     now = time.time()
     minute_ago = now - 60
 
@@ -303,16 +337,13 @@ def check_rate_limit(client_ip: str) -> bool:
         rate_limit_store[client_ip] = []
 
     # Clean old entries
-    rate_limit_store[client_ip] = [
-        timestamp for timestamp in rate_limit_store[client_ip]
-        if timestamp > minute_ago
-    ]
+    rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if t > minute_ago]
 
     # Check limit
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT_PER_MINUTE:
         return False
 
-    # Add current request
+    # Add current request and allow
     rate_limit_store[client_ip].append(now)
     return True
 
@@ -462,6 +493,11 @@ async def create_transaction(
         )
 
         # Store transaction in database
+        # Use model_dump()/dict() to reliably extract optional fields like `type`
+        try:
+            raw = transaction.model_dump()
+        except AttributeError:
+            raw = transaction.dict()
         transaction_data = {
             "transaction_id": transaction.transaction_id,
             "account_id": transaction.user_id,  # Map user_id to account_id
@@ -469,7 +505,8 @@ async def create_transaction(
             "merchant": transaction.merchant,
             "category": "unknown",  # Could be enhanced to detect category
             "timestamp": transaction.timestamp.isoformat(),
-            "location": None  # Could be enhanced with location detection
+            "location": None,  # Could be enhanced with location detection
+            "type": raw.get("type")
         }
 
         if not store_transaction(transaction_data):
@@ -519,7 +556,7 @@ async def get_all_recent_transactions(
                 cursor = conn.execute(
                     """
                     SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level, risk_explanation, created_at
+                           timestamp, location, risk_score, risk_level, risk_explanation, created_at, tx_type
                     FROM transactions
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -542,6 +579,7 @@ async def get_all_recent_transactions(
                 "risk_level": row["risk_level"] or "pending",
                 "risk_explanation": row["risk_explanation"],
                 "created_at": row["created_at"],
+                "type": row["tx_type"],
             }
             transactions.append(txn)
 
