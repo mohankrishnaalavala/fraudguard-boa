@@ -68,6 +68,30 @@ GKE Autopilot, Ingress + Managed Certs, Workload Identity, NetworkPolicy, Cloud 
 ```
 
 ---
+## 🧱 Infrastructure (infra-gcp-gke)
+
+Infra-as-code lives in a separate repo: https://github.com/mohankrishnaalavala/infra-gcp-gke
+
+High-level spin-up steps (see that repo for full details):
+- Prepare env: `gcloud auth application-default login` and set project
+- Terraform init/plan/apply under `infra-gcp-gke/envs/<env>` to create:
+  - GKE Autopilot cluster (Workload Identity enabled)
+  - Artifact Registry (us-docker.pkg.dev/<project>/fraudguard)
+  - Service accounts (builder/deployer) and optional budgets
+- Networking & DNS for HTTPS:
+  - Reserve a global static IP named `fraudguard-ip`
+  - Create A records in Cloud DNS (or your DNS provider) pointing both hosts to the Ingress IP
+    - fraudguard.mohankrishna.site → <INGRESS_IP>
+    - boa.mohankrishna.site → <INGRESS_IP>
+  - Apply k8s manifests for Ingress and ManagedCertificate:
+    - fraudguard namespace: `k8s/ingress.yaml` (host fraudguard.mohankrishna.site)
+    - bank-of-anthos namespace: `k8s/boa-ingress.yaml` (host boa.mohankrishna.site)
+  - Wait for ManagedCertificate status = Active; HTTPS will appear automatically
+
+Notes:
+- All services expose GET /healthz and use JSON logs without PII
+- Security: non-root, readOnlyRootFilesystem, NetPol, Secret Manager CSI
+- Dashboard UI shows tri-level risk only (High/Medium/Low)
 
 ## License
 Apache 2.0 (inherits from BoA and this repo)
