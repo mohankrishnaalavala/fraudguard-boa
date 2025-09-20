@@ -54,7 +54,7 @@ async def login_page(request: Request):
     if _is_authed(request):
         return RedirectResponse("/", status_code=302)
     html = f"""
-    <html><head><title>FraudGuard Login</title>
+    <html><head><title>FraudGuard for Bank of Anthos - Login</title>
     <style>
       body {{ font-family: Inter, Arial, sans-serif; background:#f8fafc; color:#111827; margin:0; display:grid; place-items:center; height:100vh; }}
       .card {{ background:#ffffff; padding:32px; border-radius:12px; width:320px; box-shadow:0 10px 30px rgba(0,0,0,.08); border:1px solid #e5e7eb; }}
@@ -64,7 +64,7 @@ async def login_page(request: Request):
     </style></head>
     <body>
       <div class="card">
-        <h2>FraudGuard</h2>
+        <h2>FraudGuard for Bank of Anthos</h2>
         <form method="post" action="/login">
           <label>Username</label>
           <input name="username" autocomplete="username" />
@@ -168,6 +168,15 @@ def _render_dashboard(transactions: list) -> str:
             return ""
         return dt.astimezone(timezone.utc).strftime("%H:%M")  # no seconds
 
+    def _parse_dt_fallback(tx: dict) -> Optional[datetime]:
+        # Prefer transaction timestamp; fallback to created_at if missing
+        ts = tx.get("timestamp")
+        dt = _p_ts(ts) if ts else None
+        if dt:
+            return dt
+        ca = tx.get("created_at")
+        return _p_ts(ca) if ca else None
+
     def _fmt_amt(x) -> str:
         try:
             val = float(x or 0)
@@ -262,7 +271,8 @@ def _render_dashboard(transactions: list) -> str:
                  .replace("'", "&#x27;")
                  .replace("`", "&#96;"))
 
-    sorted_tx = sorted(transactions, key=lambda t: t.get("timestamp", ""), reverse=True)
+    # Sort by true datetime (timestamp), with created_at as a fallback
+    sorted_tx = sorted(transactions, key=lambda t: (_parse_dt_fallback(t) or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
     rows = "".join(
         (
             (lambda dt: (
@@ -295,25 +305,25 @@ def _render_dashboard(transactions: list) -> str:
         """
 
     html = f"""
-    <html><head><title>FraudGuard Dashboard</title>
+    <html><head><title>FraudGuard for Bank of Anthos</title>
     <meta http-equiv=\"refresh\" content=\"{REFRESH_INTERVAL_SECONDS}\">
     <style>
-      body {{ font-family: Inter, Arial, sans-serif; background:#f8fafc; color:#111827; margin:0; }}
-      header {{ padding:16px 24px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #e5e7eb; background:#ffffff; position:sticky; top:0; }}
+      body {{ font-family: Inter, Arial, sans-serif; background:#f8fafc; color:#111827; margin:0; font-size:16px; }}
+      header {{ padding:20px 28px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #e5e7eb; background:#ffffff; position:sticky; top:0; }}
       .pill {{ padding:6px 10px; border-radius:999px; font-size:12px; }}
-      .table {{ width:100%; border-collapse: collapse; margin:16px; }}
-      .table th, .table td {{ padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px; }}
+      .table {{ width:100%; border-collapse: collapse; margin:20px; }}
+      .table th, .table td {{ padding:12px 14px; border-bottom:1px solid #e5e7eb; font-size:14px; }}
       .badge {{ padding:4px 8px; border-radius:999px; font-size:12px; }}
       .badge-high {{ background:#fee2e2; color:#b91c1c; }}
-      .badge-med {{ background:#fff3cd; color:#92400e; }}
+      .badge-med {{ background:#fef3c7; color:#92400e; }}
       .badge-low {{ background:#dcfce7; color:#166534; }}
-      .btn {{ padding:6px 10px; border:1px solid #d1d5db; background:#ffffff; color:#111827; border-radius:8px; cursor:pointer; }}
+      .btn {{ padding:8px 12px; border:1px solid #d1d5db; background:#ffffff; color:#111827; border-radius:8px; cursor:pointer; }}
       .btn:hover {{ background:#f3f4f6; }}
 
     </style></head>
     <body>
       <header>
-        <div>FraudGuard</div>
+        <div>FraudGuard for Bank of Anthos</div>
         <div>
           <span class=\"pill\" style=\"background:#fee2e2;color:#b91c1c\">🔴 High Risk: {len(high)}</span>
           <span class=\"pill\" style=\"background:#fff3cd;color:#92400e\">⚠️ Medium Risk: {len(med)}</span>
