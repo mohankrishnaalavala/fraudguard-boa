@@ -60,7 +60,7 @@ jobs:
           echo "🏗️ Building all FraudGuard services..."
 
           # Build all services
-          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "boa-monitor")
+          services=("mcp-gateway" "risk-scorer" "explain-agent" "action-orchestrator" "boa-monitor")
 
           for service in "${services[@]}"; do
             echo "🔨 Building $service..."
@@ -99,7 +99,7 @@ jobs:
           kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
           # Update image tags in values files
-          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
+          services=("mcp-gateway" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
 
           for service in "${services[@]}"; do
             echo "📦 Deploying $service..."

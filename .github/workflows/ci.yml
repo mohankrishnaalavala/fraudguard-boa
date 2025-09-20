@@ -131,7 +131,7 @@ jobs:
         fi
         
         # Build and push all service images
-        SERVICES="mcp-gateway txn-watcher risk-scorer explain-agent action-orchestrator"
+        SERVICES="mcp-gateway risk-scorer explain-agent action-orchestrator boa-monitor"
         for service in $SERVICES; do
           IMAGE_NAME="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/$service:$TAG"
           docker build -t $IMAGE_NAME services/$service/

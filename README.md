@@ -14,7 +14,7 @@ FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA tran
 - boa-monitor: Authenticates to BoA, fetches history, forwards to mcp-gateway
 - risk-scorer: Gemini-powered analysis + RAG over history (50 recent records)
 - explain-agent + action-orchestrator: Explainability and mitigations
-- txn-watcher: Poll/sample watcher for additional analysis paths
+
 - dashboard: Flask UI, tri-level risk (no "Normal")
 
 ## AI model(s) used
@@ -53,9 +53,9 @@ Use the BoA demo credentials shown on the BoA login page of your deployment (do 
 
 ```text
 [ BoA UI ] -> [ BoA Services ] --(JWT, APIs)--> [ boa-monitor ] --POST--> [ mcp-gateway ]
-                                                                                |
-                                                                                v
-[ txn-watcher ] ---(demo/sample txns)---> [ risk-scorer ] <--GET /api/transactions--
+                                                |
+                                                v
+                                         [ risk-scorer ] <--GET /accounts/{id}/transactions--
                                                 |
                                                 v
                                           [ explain-agent ] ---> [ action-orchestrator ]
