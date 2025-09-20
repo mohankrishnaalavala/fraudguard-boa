@@ -1,219 +1,73 @@
-# FraudGuard for Bank of Anthos
+# FraudGuard on GKE — Hackathon Submission
 
-AI-powered fraud detection system that runs alongside Bank of Anthos on GKE Autopilot. Uses Gemini AI to analyze transactions in real-time and trigger appropriate actions.
+## Problem
+Real-time fraud detection on consumer banking requires analyzing transaction patterns (frequency, timing, velocity), typical amounts, and recipient anomalies without disrupting users or modifying core banking services.
 
-## 🚀 Reproduce in 10 Minutes
+## Solution
+FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA transactions via APIs, applies Vertex AI/Gemini RAG-driven analysis, and surfaces a tri-level risk dashboard (High/Medium/Low). No changes to BoA core; we integrate via services and APIs.
 
-### Prerequisites
+- Built on Bank of Anthos: https://github.com/GoogleCloudPlatform/bank-of-anthos
+- Deployed on GKE Autopilot with Google Managed Certs and Ingress
 
-- GKE Autopilot cluster running
-- Artifact Registry repository configured
-- `kubectl` configured for your cluster
-- `helm` installed (v3.0+)
+## Components on GKE
+- mcp-gateway: Ingests/stores transactions, exposes APIs to UI and services
+- boa-monitor: Authenticates to BoA, fetches history, forwards to mcp-gateway
+- risk-scorer: Gemini-powered analysis + RAG over history (50 recent records)
+- explain-agent + action-orchestrator: Explainability and mitigations
+- txn-watcher: Poll/sample watcher for additional analysis paths
+- dashboard: Flask UI, tri-level risk (no "Normal")
 
-### Quick Start
+## AI model(s) used
+- Gemini 2.5 Flash via Generative Language API and/or Vertex AI SDK (configurable)
+- RAG over recent 50 transactions, with pattern/velocity/recipient analysis
 
-1. **Clone and navigate to the repository:**
-   ```bash
-   git clone <repository-url>
-   cd fraudguard-boa
-   ```
+## ADK/MCP/A2A usage
+- MCP Gateway stores and serves transactions, supports service-to-service calls
+- A2A style internal calls with NetworkPolicies and least-privileged SAs
+- No BoA schema changes; only API reads and derived insights
 
-2. **Update values files with your project details:**
-   ```bash
-   # Replace PROJECT_ID and REGISTRY in all values/*.yaml files
-   find values/ -name "*.yaml" -exec sed -i 's/PROJECT_ID/your-project-id/g' {} \;
-   find values/ -name "*.yaml" -exec sed -i 's/REGISTRY/your-registry-name/g' {} \;
-   ```
+## Deploy steps (Helm/Manifests)
+1) kubectl create ns boa; kubectl create ns fraudguard
+2) kubectl apply -f fraudguard-boa/k8s/boa-ingress.yaml
+3) helm upgrade --install <service> fraudguard-boa/helm/workload -n fraudguard -f fraudguard-boa/values/<service>.yaml (repeat for all)
+4) Create K8s Secret boa-api-credentials with BOA_USERNAME/BOA_PASSWORD in fraudguard ns
+5) Configure Managed Certificates and Cloud DNS for fraudguard.mohankrishna.site and boa.mohankrishna.site
 
-3. **Create namespace and deploy all services:**
-   ```bash
-   kubectl create namespace fraudguard
-   make deploy-all NAMESPACE=fraudguard
-   ```
+## Quickstart (≤5 min)
+- Make a transfer in BoA UI https://boa.mohankrishna.site/login, then open dashboard: https://fraudguard.mohankrishna.site/
+- Watch risk buckets update (High/Medium/Low) and logs in risk-scorer/mcp-gateway
 
-4. **Verify deployment:**
-   ```bash
-   kubectl get pods -n fraudguard
-   make health NAMESPACE=fraudguard
-   ```
+## Test creds
+Use the BoA demo credentials shown on the BoA login page of your deployment (do not hardcode credentials).
 
-5. **Run demo to seed test transactions:**
-   ```bash
-   make demo
-   ```
+## Limitations / Roadmap
+- Demo-grade SQLite storage; replace with Cloud SQL/Spanner for prod
+- Expand model prompts and feature engineering; add BigQuery historical store
+- Vertex AI as default path (config toggle already present)
 
-6. **Access the dashboard:**
-   ```bash
-   kubectl port-forward -n fraudguard svc/dashboard 8080:8080
-   # Open http://localhost:8080 in your browser
-   ```
 
-### Individual Service Deployment
+![FraudGuard Architecture](images/architecture.png)
+---
 
-Deploy services individually using per-service values:
+## Architecture diagram (conceptual)
 
-```bash
-# Deploy MCP Gateway
-helm upgrade --install mcp-gateway ./helm/workload -n fraudguard -f values/mcp-gateway.yaml
+```text
+[ BoA UI ] -> [ BoA Services ] --(JWT, APIs)--> [ boa-monitor ] --POST--> [ mcp-gateway ]
+                                                                                |
+                                                                                v
+[ txn-watcher ] ---(demo/sample txns)---> [ risk-scorer ] <--GET /api/transactions--
+                                                |
+                                                v
+                                          [ explain-agent ] ---> [ action-orchestrator ]
+                                                |
+                                                v
+                                           [ Dashboard ] (High/Medium/Low)
 
-# Deploy Transaction Watcher
-helm upgrade --install txn-watcher ./helm/workload -n fraudguard -f values/txn-watcher.yaml
-
-# Deploy Risk Scorer
-helm upgrade --install risk-scorer ./helm/workload -n fraudguard -f values/risk-scorer.yaml
-
-# Deploy Explain Agent
-helm upgrade --install explain-agent ./helm/workload -n fraudguard -f values/explain-agent.yaml
-
-# Deploy Action Orchestrator
-helm upgrade --install action-orchestrator ./helm/workload -n fraudguard -f values/action-orchestrator.yaml
-
-# Deploy Dashboard
-helm upgrade --install dashboard ./helm/workload -n fraudguard -f values/dashboard.yaml
-
-# Deploy BoA Monitor (requires Secret boa-api-credentials)
-# Create secret once:
-# kubectl -n fraudguard create secret generic boa-api-credentials \
-#   --from-literal=BOA_USERNAME=testuser \
-#   --from-literal=BOA_PASSWORD=bankofanthos
-helm upgrade --install boa-monitor-workload ./helm/workload -n fraudguard -f values/boa-monitor.yaml
+GKE Autopilot, Ingress + Managed Certs, Workload Identity, NetworkPolicy, Cloud Logging/Monitoring
+(No changes to BoA core; extension via APIs only)
 ```
 
-## 🏗️ Architecture
-
-FraudGuard consists of 6 microservices that work together to provide real-time fraud detection:
-
-1. **MCP Gateway** - Read-only facade over Bank of Anthos APIs
-2. **Transaction Watcher** - Polls for new transactions and triggers analysis
-3. **Risk Scorer** - Uses Gemini AI to analyze transaction risk
-4. **Explain Agent** - Creates user-friendly explanations and audit records
-5. **Action Orchestrator** - Executes actions based on risk scores
-6. **Dashboard** - Real-time UI for monitoring transactions and risk scores
-
-### Data Flow
-
-```
-Bank of Anthos → MCP Gateway → Txn Watcher → Risk Scorer (Gemini) → Explain Agent → Action Orchestrator
-                                                                            ↓
-                                                                      Dashboard (UI)
-```
-
-## 🛡️ Security Features
-
-- **Least Privilege**: Each service runs with minimal RBAC permissions
-- **Network Policies**: Deny-by-default with explicit allow rules
-- **Pod Security**: Non-root containers with read-only root filesystem
-- **Secret Management**: Integration with Secret Manager CSI
-- **No PII in Logs**: Privacy-safe logging and AI prompts
-
-## 📊 Service Details
-
-### MCP Gateway
-- **Purpose**: Read-only API facade over Bank of Anthos
-- **Features**: Rate limiting, audit logging, MCP tool exposure
-- **Port**: 8080
-- **Health**: `GET /healthz`
-
-### Transaction Watcher
-- **Purpose**: Polls for new transactions and triggers analysis
-- **Features**: Configurable polling interval, duplicate detection
-- **Port**: 8080
-- **Health**: `GET /healthz`
-
-### Risk Scorer
-- **Purpose**: AI-powered transaction risk analysis using Gemini
-- **Features**: Privacy-safe prompts, configurable thresholds
-- **Port**: 8080
-- **Health**: `GET /healthz`
-
-### Explain Agent
-- **Purpose**: Creates user-friendly explanations and audit records
-- **Features**: SQLite audit storage, action determination
-- **Port**: 8080
-- **Health**: `GET /healthz`
-
-### Action Orchestrator
-- **Purpose**: Executes actions based on risk analysis
-- **Features**: Configurable thresholds, BoA API integration
-- **Port**: 8080
-- **Health**: `GET /healthz`
-
-### Dashboard
-- **Purpose**: Real-time monitoring UI
-- **Features**: Auto-refresh, risk visualization, transaction history
-- **Port**: 8080
-- **Health**: `GET /healthz`
-
-## 🔧 Configuration
-
-Each service can be configured via environment variables. See individual values files in `values/` directory for service-specific configuration options.
-
-### Key Environment Variables
-
-- `LOG_LEVEL`: Logging level (debug, info, warning, error)
-- `PORT`: Service port (default: 8080)
-- `GEMINI_API_KEY`: Gemini API key for risk scoring
-- `BOA_BASE_URL`: Bank of Anthos base URL
-- `BOA_USERSERVICE_URL`: BoA userservice base URL (default: http://userservice.boa.svc.cluster.local:8080)
-- `BOA_HISTORY_URL`: BoA transactionhistory base URL (default: http://transactionhistory.boa.svc.cluster.local:8080)
-- `BOA_USERNAME`, `BOA_PASSWORD`: Injected via Kubernetes Secret `boa-api-credentials` (do not commit to Git)
-
-## 🧪 Testing
-
-Run tests for all services:
-
-```bash
-make test
-```
-
-Run linting:
-
-```bash
-make lint
-```
-
-## 📝 Development
-
-### Building Images
-
-```bash
-make build
-```
-
-### Viewing Logs
-
-```bash
-make logs SERVICE=risk-scorer
-```
-
-### Cleanup
-
-```bash
-make clean NAMESPACE=fraudguard
-```
-
-## 🎯 Demo Script
-
-The included demo script creates sample transactions to demonstrate the fraud detection pipeline:
-
-```bash
-./scripts/make_demo.sh
-```
-
-This creates:
-- Normal grocery transaction (low risk)
-- High-value online purchase (high risk)
-- Late-night restaurant transaction (medium risk)
-
-## 📋 Helm Chart
-
-The project uses a single, reusable Helm chart (`helm/workload/`) that can be deployed multiple times with different values files. This approach provides:
-
-- **DRY**: Single chart definition for all services
-- **Flexibility**: Per-service customization via values files
-- **Independence**: Each service can be deployed/updated separately
-
+---
 ## 🧱 Infrastructure (infra-gcp-gke)
 
 Infra-as-code lives in a separate repo: https://github.com/mohankrishnaalavala/infra-gcp-gke
@@ -239,28 +93,9 @@ Notes:
 - Security: non-root, readOnlyRootFilesystem, NetPol, Secret Manager CSI
 - Dashboard UI shows tri-level risk only (High/Medium/Low)
 
-## 🚨 Troubleshooting
+## License
+Apache 2.0 (inherits from BoA and this repo)
 
-### Common Issues
+## Submission page 
+This solution deploys fully on Google Kubernetes Engine (GKE Autopilot) and uses Google AI (Gemini) for fraud analysis. It integrates with the open-source Bank of Anthos application strictly via APIs and services with no changes to BoA core. The architecture includes MCP Gateway, BoA Monitor, Risk Scorer (Gemini), Explain Agent, and a tri-level risk Dashboard on GKE, secured by NetworkPolicies and Managed Certificates. Observability is provided via Cloud Logging/Monitoring. DNS is managed in Cloud DNS.
 
-1. **Services not starting**: Check resource limits in values files
-2. **Network connectivity**: Verify NetworkPolicy configurations
-3. **Gemini API errors**: Ensure API key is configured correctly
-4. **Dashboard not loading**: Check explain-agent service health
-
-### Debug Commands
-
-```bash
-# Check pod status
-kubectl get pods -n fraudguard
-
-# View service logs
-kubectl logs -n fraudguard -l app.kubernetes.io/name=risk-scorer
-
-# Test service connectivity
-kubectl exec -n fraudguard -it deployment/mcp-gateway -- curl http://risk-scorer:8080/healthz
-```
-
-## 📄 License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
