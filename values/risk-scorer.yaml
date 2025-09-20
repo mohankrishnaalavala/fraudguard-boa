@@ -33,8 +33,15 @@ container:
     - name: FORCE_GL_OAUTH
       value: "false"
     - name: RAG_INCLUDE_BOA
-      value: "false"
       value: "true"
+    - name: USE_VERTEX_MATCHING
+      value: "false"
+    - name: VERTEX_EMBED_MODEL
+      value: "text-embedding-004"
+    - name: VERTEX_ME_INDEX_ENDPOINT
+      value: ""
+    - name: VERTEX_ME_INDEX_DEPLOYED_ID
+      value: ""
     - name: BOA_USERSERVICE_URL
       value: "http://userservice.boa.svc.cluster.local:8080"
     - name: BOA_HISTORY_URL
@@ -66,7 +73,7 @@ service:
   port: 8080
 
 hpa:
-  enabled: false
+  enabled: true
   minReplicas: 1
   maxReplicas: 5
   targetCPUUtilizationPercentage: 70

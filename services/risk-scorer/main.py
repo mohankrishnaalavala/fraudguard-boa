@@ -58,6 +58,12 @@ BOA_HISTORY_URL = os.getenv("BOA_HISTORY_URL", "http://transactionhistory.boa.sv
 BOA_USERNAME = os.getenv("BOA_USERNAME", "")
 BOA_PASSWORD = os.getenv("BOA_PASSWORD", "")
 
+# Vertex Matching Engine (Vector Search) config
+USE_VERTEX_MATCHING = os.getenv("USE_VERTEX_MATCHING", "false").lower() == "true"
+VERTEX_EMBED_MODEL = os.getenv("VERTEX_EMBED_MODEL", "text-embedding-004")
+VERTEX_ME_INDEX_ENDPOINT = os.getenv("VERTEX_ME_INDEX_ENDPOINT", "")  # projects/../locations/../indexEndpoints/...
+VERTEX_ME_INDEX_DEPLOYED_ID = os.getenv("VERTEX_ME_INDEX_DEPLOYED_ID", "")
+
 # Load API key from file (Secret Manager CSI) if provided
 if GEMINI_API_KEY_FILE:
     try:
@@ -398,11 +404,129 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
             "weekend_bias": weekend_bias,
             "velocity_15m": v15,
             "velocity_60m": v60,
-            "velocity_flag": (v15 >= 3) or (v60 >= 5)
+            "velocity_flag": (v15 >= 3) or (v60 >= 5),
         }
         return signals
     except Exception:
         return {"signal_error": True}
+
+# === Vertex Matching Engine helpers (embeddings + ANN retrieval) ===
+async def _embed_text(text: str) -> list[float]:
+    """Get embedding vector for text using Vertex Text Embeddings. Never crash caller."""
+    try:
+        import anyio
+        def _sync_embed() -> list[float]:
+            from vertexai import init
+            # Try both import paths for TextEmbeddingModel (SDK variations)
+            try:
+                from vertexai.language_models import TextEmbeddingModel  # type: ignore
+            except Exception:
+                from vertexai.preview.language_models import TextEmbeddingModel  # type: ignore
+            init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            model = TextEmbeddingModel.from_pretrained(VERTEX_EMBED_MODEL)
+            resp = model.get_embeddings(
+                [text],
+                output_dimensionality=None
+            )
+            vec = resp[0].values if resp and resp[0] else []
+            return list(vec) if vec else []
+        return await anyio.to_thread.run_sync(_sync_embed)
+    except Exception as e:
+        logger.info("embedding_failed", error=str(e))
+        return []
+
+
+def _build_embedding_text(tx: dict) -> str:
+    """Construct embedding text ONLY from allowed BoA fields: account_id, label, date, type, amount.
+    Do NOT include merchant/category/location.
+    """
+    acct = str(tx.get("account_id", ""))
+    label = str(tx.get("label", "") or "")  # may be empty
+    ts = str(tx.get("timestamp", ""))
+    # normalize date only
+    date_only = ts.split("T")[0] if ts else ""
+    tx_type = str(tx.get("type", "unknown"))
+    amt = float(tx.get("amount", 0) or 0)
+    return f"account:{acct} label:{label} date:{date_only} type:{tx_type} amount:{amt:.2f}"
+
+
+async def _me_find_neighbor_ids(query_vec: list[float], k: int = 20) -> list[str]:
+    """Query Matching Engine for nearest neighbor IDs. Returns [] on failure."""
+    if not (VERTEX_ME_INDEX_ENDPOINT and VERTEX_ME_INDEX_DEPLOYED_ID):
+        return []
+    try:
+        import anyio
+        def _sync_query() -> list[str]:
+            from google.cloud import aiplatform
+            aiplatform.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            ie = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VERTEX_ME_INDEX_ENDPOINT)
+            res = ie.find_neighbors(
+                deployed_index_id=VERTEX_ME_INDEX_DEPLOYED_ID,
+                queries=[query_vec],
+                num_neighbors=k,
+            )
+            # res is a list with one entry per query
+            neighbors = res[0] if res else []
+            ids: list[str] = []
+            for n in neighbors:
+                try:
+                    ids.append(str(getattr(n, "id", None) or getattr(n, "datapoint_id", "")))
+                except Exception:
+                    pass
+            return [i for i in ids if i]
+        return await anyio.to_thread.run_sync(_sync_query)
+    except Exception as e:
+        logger.info("me_query_failed", error=str(e))
+        return []
+
+
+async def _fetch_minimal_txns_by_ids(ids: list[str]) -> list[dict]:
+    if not ids:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{MCP_GATEWAY_URL}/api/transactions/by-ids",
+                json={"ids": ids},
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return list(data.get("transactions", [])) if isinstance(data, dict) else []
+    except Exception as e:
+        logger.info("fetch_by_ids_failed", error=str(e))
+    return []
+
+
+def _summarize_neighbors_minimal(neighbors: list[dict]) -> dict:
+    """Summarize neighbor set using allowed fields only."""
+    import statistics
+    amounts = [float(x.get("amount", 0) or 0) for x in neighbors]
+    types = [str(x.get("type", "unknown") or "unknown").lower() for x in neighbors]
+    dates = []
+    for x in neighbors:
+        ts = str(x.get("timestamp", ""))
+        try:
+            dates.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+        except Exception:
+            pass
+    typical_amount = round(statistics.median(amounts), 2) if amounts else 0
+    credit = sum(1 for t in types if t.startswith("credit"))
+    debit = sum(1 for t in types if t.startswith("debit"))
+    recency_days = None
+    try:
+        if dates:
+            latest = max(dates)
+            recency_days = max(0, int((datetime.now(timezone.utc) - latest.astimezone(timezone.utc)).total_seconds() // 86400))
+    except Exception:
+        recency_days = None
+    return {
+        "neighbor_count": len(neighbors),
+        "typical_amount": typical_amount,
+        "type_breakdown": {"credit": credit, "debit": debit},
+        "recency_days": recency_days,
+    }
+
 
 
 # Local heuristic as a last-resort when AI output is unavailable/unparsable
@@ -983,6 +1107,7 @@ async def call_gemini_api(prompt: str) -> dict:
                     return ""
                 return ""
             pieces = []
+
             for p in parts:
                 if not isinstance(p, dict):
                     continue
@@ -1088,8 +1213,8 @@ async def analyze_transaction(transaction: Transaction):
             amount=transaction.amount
         )
 
-        # RAG: fetch and summarize account history
-        history = await fetch_account_history(transaction.account_id, limit=50)
+        # RAG: fetch and summarize account history (now up to 100)
+        history = await fetch_account_history(transaction.account_id, limit=100)
         try:
             rag_summary = summarize_history_for_rag(history)
         except Exception as e:
@@ -1108,7 +1233,29 @@ async def analyze_transaction(transaction: Transaction):
             "timestamp": transaction.timestamp.isoformat(),
         }
         pattern_signals = analyze_pattern_signals(tx_payload, rag_summary)
+        # Optional: Vector neighbor context via Vertex Matching Engine (only allowed fields)
+        vector_context = None
+        if USE_VERTEX_MATCHING:
+            try:
+                embed_text = _build_embedding_text(tx_payload)
+                qvec = await _embed_text(embed_text)
+                if qvec:
+                    ids = await _me_find_neighbor_ids(qvec, k=20)
+                    if ids:
+                        neigh_tx = await _fetch_minimal_txns_by_ids(ids)
+                        if neigh_tx:
+                            vector_context = _summarize_neighbors_minimal(neigh_tx)
+            except Exception as ve:
+                logger.info("vector_context_failed", error=str(ve))
+
         prompt = build_vertex_prompt(tx_payload, rag_summary, pattern_signals)
+        if vector_context:
+            try:
+                import json as _json
+                prompt = prompt + "\n\nVECTOR_NEIGHBOR_SUMMARY: " + _json.dumps(vector_context)
+            except Exception:
+                pass
+
 
         # Debug logging for enhanced prompting
         logger.info(
@@ -1122,6 +1269,8 @@ async def analyze_transaction(transaction: Transaction):
 
         # Build baseline historical rationale (even if AI falls back)
         baseline_rationale = None
+        # Optional: Vector neighbor context via Vertex Matching Engine (only allowed fields)
+
         try:
             recipient_key = str(tx_payload.get("label") or "").lower()
             amount_val = float(tx_payload.get("amount") or 0)

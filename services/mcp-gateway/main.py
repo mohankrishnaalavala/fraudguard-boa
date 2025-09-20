@@ -415,7 +415,7 @@ async def get_account(account_id: str, client_ip: str = Depends(get_client_ip)):
 @app.get("/accounts/{account_id}/transactions", response_model=List[Transaction])
 async def get_recent_transactions(
     account_id: str,
-    limit: int = 50,
+    limit: int = 100,
     client_ip: str = Depends(get_client_ip)
 ):
     """Get recent transactions for an account (read-only)"""
@@ -425,11 +425,11 @@ async def get_recent_transactions(
 
     try:
         logger.info("transactions_requested", account_id=account_id, limit=limit, client_ip=client_ip)
-        # Clamp retention to last 50 per account for analysis context
+        # Clamp retention to last 100 per account for analysis context
         try:
-            limit = max(1, min(int(limit), 50))
+            limit = max(1, min(int(limit), 100))
         except Exception:
-            limit = 50
+            limit = 100
 
 
         # Get real transactions from database
@@ -590,6 +590,62 @@ async def get_all_recent_transactions(
         logger.error("recent_transactions_failed", error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+class IdsRequest(BaseModel):
+    ids: List[str]
+
+
+def get_transactions_by_ids(ids: List[str]) -> List[dict]:
+    """Fetch minimal transaction fields by IDs (no merchant/category/location)."""
+    if not ids:
+        return []
+    try:
+        with db_lock:
+            with sqlite3.connect(DATABASE_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                # Build parameterized IN clause
+                placeholders = ",".join(["?"] * len(ids))
+                query = f"""
+                    SELECT transaction_id, account_id, amount, timestamp, tx_type
+                    FROM transactions
+                    WHERE transaction_id IN ({placeholders})
+                """
+                cursor = conn.execute(query, tuple(ids))
+                rows = cursor.fetchall()
+                out: List[dict] = []
+                for row in rows:
+                    out.append({
+                        "transaction_id": row["transaction_id"],
+                        "account_id": row["account_id"],
+                        "amount": row["amount"],
+                        "timestamp": row["timestamp"],
+                        "type": row["tx_type"],
+                    })
+                logger.info("transactions_by_ids_retrieved", count=len(out))
+                return out
+    except Exception as e:
+        logger.error("transactions_by_ids_failed", error=str(e))
+        return []
+
+
+@app.post("/api/transactions/by-ids")
+async def api_transactions_by_ids(req: IdsRequest, client_ip: str = Depends(get_client_ip)):
+    """Return minimal transaction details for a list of IDs.
+    Output fields: transaction_id, account_id, amount, timestamp, type
+    """
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        ids = [str(x) for x in (req.ids or []) if str(x).strip()]
+        if not ids:
+            return {"transactions": []}
+        rows = get_transactions_by_ids(ids)
+        return {"transactions": rows}
+    except Exception as e:
+        logger.error("api_transactions_by_ids_failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.get("/mcp/schema")
 async def mcp_schema():
     """Lightweight MCP-style schema for demo tooling."""
@@ -598,7 +654,7 @@ async def mcp_schema():
         "tools": [
             {
                 "name": "mcp.list_transactions",
-                "description": "List recent transactions for an account (max 50).",
+                "description": "List recent transactions for an account (max 100).",
                 "input": {"type": "object", "properties": {"account_id": {"type": "string"}, "limit": {"type": "integer"}}},
                 "output": {"type": "array", "items": {"type": "object"}}
             },
@@ -612,12 +668,12 @@ async def mcp_schema():
     }
 
 @app.get("/mcp/transactions/{account_id}")
-async def mcp_list_transactions(account_id: str, limit: int = 50, client_ip: str = Depends(get_client_ip)):
+async def mcp_list_transactions(account_id: str, limit: int = 100, client_ip: str = Depends(get_client_ip)):
     if not check_rate_limit(client_ip):
         logger.warning("rate_limit_exceeded", client_ip=client_ip, account_id=account_id)
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     try:
-        limit = max(1, min(int(limit), 50))
+        limit = max(1, min(int(limit), 100))
         rows = get_account_transactions(account_id, limit)
         # Return raw dicts (already sanitized by DB layer)
         return rows
