@@ -2,7 +2,7 @@ nameOverride: mcp-gateway
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/mcp-gateway
-  tag: hackathon
+  tag: fixissue-97ed650
   pullPolicy: Always
 
 replicaCount: 1
