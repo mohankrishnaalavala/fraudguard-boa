@@ -27,7 +27,7 @@ container:
     - name: MCP_GATEWAY_URL
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: POLL_INTERVAL
-      value: "10"
+      value: "5"
     - name: LOG_LEVEL
       value: "INFO"
     - name: BOA_USERSERVICE_URL

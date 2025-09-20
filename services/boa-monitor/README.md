@@ -15,7 +15,7 @@ Monitors Bank of Anthos (BoA) transactions and forwards them to FraudGuard (MCP 
 
 ## Configuration
 - MCP_GATEWAY_URL (default: http://mcp-gateway.fraudguard.svc.cluster.local:8080)
-- POLL_INTERVAL (seconds, default 10)
+- POLL_INTERVAL (seconds, default 10; deployment currently set to 5s via Helm values)
 - BOA_USERSERVICE_URL, BOA_HISTORY_URL
 - BOA_USERNAME, BOA_PASSWORD (use K8s Secret, never commit secrets)
 
