@@ -3,7 +3,7 @@ namespace: fraudguard
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/boa-monitor
-  tag: latest
+  tag: fixissue-b53f2d0
   pullPolicy: Always
 
 replicaCount: 1
@@ -44,6 +44,8 @@ container:
       value: "text-embedding-004"
     - name: VERTEX_ME_INDEX_RESOURCE
       value: "projects/237184630181/locations/us-central1/indexes/3844510576239706112"  # projects/PROJECT/locations/REGION/indexes/INDEX_ID
+    - name: MAX_TXNS_PER_CYCLE
+      value: "50"
 
   envFrom:
     - name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret

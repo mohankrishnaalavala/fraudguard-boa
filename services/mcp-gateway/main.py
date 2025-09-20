@@ -725,6 +725,28 @@ async def mcp_analyze(body: dict, client_ip: str = Depends(get_client_ip)):
         raise HTTPException(status_code=500, detail="Analyze forwarding failed")
 
 
+@app.post("/api/manual-sync")
+async def manual_sync_proxy(client_ip: str = Depends(get_client_ip)):
+    """Trigger boa-monitor manual sync via mcp-gateway proxy.
+    Returns upstream manual-sync stats or 502 on failure.
+    """
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        upstream = os.getenv("BOA_MONITOR_URL", "http://boa-monitor.fraudguard.svc.cluster.local:8080")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{upstream}/manual-sync")
+            data = {}
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"raw": await resp.aread()}
+            return {"upstream_status": resp.status_code, **(data if isinstance(data, dict) else {"data": str(data)})}
+    except Exception as e:
+        logger.error("manual_sync_proxy_failed", error=str(e))
+        raise HTTPException(status_code=502, detail="Upstream manual sync failed")
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""

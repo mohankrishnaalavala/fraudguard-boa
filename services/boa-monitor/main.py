@@ -47,6 +47,7 @@ app = FastAPI(
 # Configuration
 MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.svc.cluster.local:8080")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))  # seconds
+MAX_TXNS_PER_CYCLE = int(os.getenv("MAX_TXNS_PER_CYCLE", "50"))
 
 # Bank of Anthos service endpoints
 BOA_USERSERVICE_URL = os.getenv("BOA_USERSERVICE_URL", "http://userservice.boa.svc.cluster.local:8080")
@@ -251,6 +252,14 @@ async def _upsert_to_index(tx: Dict, vector: list[float]) -> bool:
         logger.info("vector_upsert_failed", error=str(e))
         return False
 
+async def _index_tx_async(tx: Dict) -> None:
+    try:
+        text = _build_embedding_text_from_boa_tx(tx)
+        vec = await _embed_text(text)
+        if vec:
+            await _upsert_to_index(tx, vec)
+    except Exception as ix:
+        logger.info("indexer_skip_error", error=str(ix))
 
 async def forward_to_fraudguard(transaction: Dict) -> bool:
     """Forward transaction to FraudGuard for AI analysis and upsert to Vertex index (optional)."""
@@ -288,10 +297,7 @@ async def forward_to_fraudguard(transaction: Dict) -> bool:
 
         if ok and USE_VERTEX_INDEXER:
             try:
-                text = _build_embedding_text_from_boa_tx(transaction)
-                vec = await _embed_text(text)
-                if vec:
-                    await _upsert_to_index(transaction, vec)
+                asyncio.create_task(_index_tx_async(transaction))
             except Exception as ix:
                 logger.info("indexer_skip_error", error=str(ix))
 
@@ -386,7 +392,9 @@ async def monitor_boa_transactions():
             new_transactions = 0
             forwarded_transactions = 0
 
-            for transaction in transactions:
+            # Limit work per cycle to avoid long blocking cycles
+            tx_iter = transactions[:MAX_TXNS_PER_CYCLE] if isinstance(transactions, list) else transactions
+            for transaction in tx_iter:
                 transaction_id = transaction.get("transactionId")
 
                 # Skip if we've already processed this transaction

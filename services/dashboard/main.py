@@ -427,7 +427,8 @@ def _render_dashboard(transactions: list) -> str:
           </div>
           <div style="flex:1"></div>
           <div class="toggle">
-            <label class="toggle-label"><input type="checkbox" id="darkToggle"> Dark mode</label>
+            <button class="btn" id="manualSyncBtn">Manual Sync</button>
+            <label class="toggle-label" style="margin-left:8px;"><input type="checkbox" id="darkToggle"> Dark mode</label>
           </div>
         </section>
         <div class=\"table-wrapper\">
@@ -452,7 +453,23 @@ def _render_dashboard(transactions: list) -> str:
           }}
         }}
 
+        async function manualSync() {{
+          try {{
+            const res = await fetch('/api/manual-sync', {{ method: 'POST' }});
+            const data = await res.json();
+            const f = data.transactions_forwarded ?? data.forwarded ?? 0;
+            const n = data.transactions_found ?? data.found ?? 0;
+            alert(`Manual sync: forwarded ${f}/${n} (status ${data.upstream_status ?? res.status})`);
+            location.reload();
+          }} catch (e) {{
+            alert('Manual sync failed');
+          }}
+        }}
+
         (function() {{
+          const msBtn = document.getElementById('manualSyncBtn');
+          if (msBtn) msBtn.addEventListener('click', manualSync);
+
           const tbody = document.querySelector('tbody');
           const rows = Array.from(tbody.querySelectorAll('tr'));
           let activeRisks = new Set(['high','medium','low']);
