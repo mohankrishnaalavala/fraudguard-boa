@@ -2,7 +2,7 @@ nameOverride: dashboard
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/dashboard
-  tag: fixissue-7e6a2bd
+  tag: fixissue-0d3ea77
   pullPolicy: Always
 
 replicaCount: 1
