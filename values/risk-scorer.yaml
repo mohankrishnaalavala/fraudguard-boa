@@ -25,13 +25,13 @@ container:
     - name: MCP_GATEWAY_URL
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: USE_VERTEX_AI
-      value: "false"
+      value: "true"
     - name: USE_VERTEX_SDK
       value: "false"
     - name: PREFER_GL_API
-      value: "true"
+      value: "false"
     - name: FORCE_GL_OAUTH
-      value: "true"
+      value: "false"
     - name: RAG_INCLUDE_BOA
       value: "true"
     - name: BOA_USERSERVICE_URL
