@@ -120,6 +120,19 @@ async def notify_action(request: Request):
         _log("notify_failed", error=str(e))
         return {"success": False, "message": "notify failed"}
 
+@app.post("/api/manual-sync")
+async def dash_manual_sync(request: Request):
+    if not _is_authed(request):
+        return RedirectResponse("/login", status_code=302)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{MCP_GATEWAY_URL}/api/manual-sync")
+            return PlainTextResponse(await resp.aread(), status_code=resp.status_code, media_type="application/json")
+    except Exception as e:
+        _log("manual_sync_proxy_failed", error=str(e))
+        return PlainTextResponse('{"error":"manual sync failed"}', status_code=502, media_type="application/json")
+
+
 
 @app.get("/logout")
 async def logout():
