@@ -34,7 +34,7 @@ FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA tran
 5) Configure Managed Certificates and Cloud DNS for fraudguard.mohankrishna.site and boa.mohankrishna.site
 
 ## Quickstart (≤5 min)
-- Make a transfer in BoA UI, then open dashboard: https://fraudguard.mohankrishna.site/
+- Make a transfer in BoA UI https://boa.mohankrishna.site/login, then open dashboard: https://fraudguard.mohankrishna.site/
 - Watch risk buckets update (High/Medium/Low) and logs in risk-scorer/mcp-gateway
 
 ## Test creds
