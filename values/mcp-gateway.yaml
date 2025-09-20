@@ -30,6 +30,9 @@ resources:
 service:
   type: ClusterIP
   port: 8080
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "fg-backendconfig"}'
 
 hpa:
   enabled: true
@@ -86,6 +89,15 @@ networkPolicy:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: fraudguard
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow GCLB health checks
+    - from:
+        - ipBlock:
+            cidr: 35.191.0.0/16
+        - ipBlock:
+            cidr: 130.211.0.0/22
       ports:
         - protocol: TCP
           port: 8080

@@ -62,6 +62,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Allow GCE Ingress to route with /api/mcp prefix without rewriting
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class StripPrefixMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, prefix: str = "/api/mcp"):
+        super().__init__(app)
+        self.prefix = prefix
+
+    async def dispatch(self, request, call_next):
+        path = request.scope.get("path", "")
+        if path.startswith(self.prefix):
+            request.scope["path"] = path[len(self.prefix):] or "/"
+        return await call_next(request)
+
+app.add_middleware(StripPrefixMiddleware, prefix="/api/mcp")
+
 # Simple in-memory rate limiting (use Redis in production)
 rate_limit_store: Dict[str, List[float]] = {}
 
