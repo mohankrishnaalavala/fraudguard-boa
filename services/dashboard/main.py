@@ -119,7 +119,7 @@ def _render_dashboard(transactions: list) -> str:
         return f"""
         <div class="panel" style="border-color:{color}">
           <div class="panel-title">{title}</div>
-          <div class="rows">{rows or '<div class=\"row\">No items</div>'}</div>
+          <div class="rows">{rows or '<div class="row">No items</div>'}</div>
         </div>
         """
 

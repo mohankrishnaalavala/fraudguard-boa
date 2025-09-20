@@ -2,7 +2,7 @@ nameOverride: dashboard
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/dashboard
-  tag: latest
+  tag: v1
   pullPolicy: Always
 
 replicaCount: 1
@@ -22,6 +22,10 @@ container:
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: REFRESH_INTERVAL_SECONDS
       value: "10"
+    - name: DASHBOARD_USERNAME
+      value: "admin"
+    - name: DASHBOARD_PASSWORD
+      value: "admin"
 
 resources:
   requests:
