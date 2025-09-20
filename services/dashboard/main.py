@@ -56,24 +56,32 @@ async def login_page(request: Request):
     html = f"""
     <html><head><title>FraudGuard for Bank of Anthos - Login</title>
     <style>
-      body {{ font-family: Inter, Arial, sans-serif; background:#f8fafc; color:#111827; margin:0; display:grid; place-items:center; height:100vh; }}
-      .card {{ background:#ffffff; padding:32px; border-radius:12px; width:320px; box-shadow:0 10px 30px rgba(0,0,0,.08); border:1px solid #e5e7eb; }}
-      input {{ width:100%; padding:10px 12px; border-radius:8px; border:1px solid #d1d5db; background:#ffffff; color:#111827; }}
-      label {{ font-size:12px; color:#374151; }}
-      button {{ width:100%; padding:10px 12px; border:0; border-radius:8px; background:#2563eb; color:white; cursor:pointer; }}
+      body {{ font-family: Inter, Arial, sans-serif; background:linear-gradient(135deg,#eef2ff,#fef3c7); color:#111827; margin:0; }}
+      .wrapper {{ display:grid; place-items:center; min-height:100vh; padding:24px; }}
+      .card {{ background:#ffffff; padding:32px; border-radius:14px; width:360px; box-shadow:0 20px 40px rgba(2,6,23,.10); border:1px solid #e5e7eb; }}
+      h2 {{ margin:0 0 6px 0; font-size:20px; }}
+      .muted {{ color:#6b7280; font-size:12px; margin-bottom:16px; }}
+      input {{ width:100%; padding:12px 14px; border-radius:10px; border:1px solid #d1d5db; background:#ffffff; color:#111827; }}
+      input:focus {{ outline:none; border-color:#6366f1; box-shadow:0 0 0 3px rgba(99,102,241,.15); }}
+      label {{ font-size:12px; color:#374151; display:block; margin-bottom:6px; }}
+      button {{ width:100%; padding:12px 14px; border:0; border-radius:10px; background:linear-gradient(135deg,#0ea5e9,#6366f1); color:white; cursor:pointer; font-weight:600; box-shadow:0 10px 18px rgba(99,102,241,.25); }}
+      button:hover {{ filter:brightness(1.03); }}
     </style></head>
     <body>
-      <div class="card">
-        <h2>FraudGuard for Bank of Anthos</h2>
-        <form method="post" action="/login">
-          <label>Username</label>
-          <input name="username" autocomplete="username" />
-          <div style="height:8px"></div>
-          <label>Password</label>
-          <input type="password" name="password" autocomplete="current-password" />
-          <div style="height:16px"></div>
-          <button>Login</button>
-        </form>
+      <div class="wrapper">
+        <div class="card">
+          <h2>FraudGuard for Bank of Anthos</h2>
+          <div class="muted">Sign in to continue</div>
+          <form method="post" action="/login">
+            <label>Username</label>
+            <input name="username" autocomplete="username" />
+            <div style="height:10px"></div>
+            <label>Password</label>
+            <input type="password" name="password" autocomplete="current-password" />
+            <div style="height:16px"></div>
+            <button>Login</button>
+          </form>
+        </div>
       </div>
     </body></html>
     """
@@ -308,33 +316,87 @@ def _render_dashboard(transactions: list) -> str:
     <html><head><title>FraudGuard for Bank of Anthos</title>
     <meta http-equiv=\"refresh\" content=\"{REFRESH_INTERVAL_SECONDS}\">
     <style>
-      body {{ font-family: Inter, Arial, sans-serif; background:#f8fafc; color:#111827; margin:0; font-size:16px; }}
-      header {{ padding:20px 28px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #e5e7eb; background:#ffffff; position:sticky; top:0; }}
-      .pill {{ padding:6px 10px; border-radius:999px; font-size:12px; }}
-      .table {{ width:100%; border-collapse: collapse; margin:20px; }}
-      .table th, .table td {{ padding:12px 14px; border-bottom:1px solid #e5e7eb; font-size:14px; }}
-      .badge {{ padding:4px 8px; border-radius:999px; font-size:12px; }}
+      :root {{ --muted:#6b7280; --surface:#ffffff; --line:#e5e7eb; --bg:#f8fafc; }}
+      * {{ box-sizing: border-box; }}
+      body {{ font-family: Inter, Arial, sans-serif; background:var(--bg); color:#111827; margin:0; font-size:16px; }}
+      a {{ color:inherit; }}
+      .container {{ max-width: 1200px; margin: 0 auto; padding: 0 24px; }}
+
+      header {{ position:sticky; top:0; z-index:10; background:linear-gradient(135deg,#0ea5e9,#6366f1); color:#ffffff; box-shadow:0 2px 8px rgba(0,0,0,.1); }}
+      .header-inner {{ display:flex; align-items:center; justify-content:space-between; padding:16px 0; }}
+      .brand {{ font-weight:700; font-size:18px; letter-spacing:.3px; }}
+      .pill {{ padding:6px 10px; border-radius:999px; font-size:12px; margin-left:6px; display:inline-block; }}
+
+      .stats {{ display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:16px; margin:20px 0; }}
+      .stat-card {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; display:flex; align-items:center; gap:12px; box-shadow:0 6px 18px rgba(0,0,0,.04); }}
+      .stat-icon {{ width:36px; height:36px; display:grid; place-items:center; border-radius:10px; font-size:18px; }}
+      .stat-high .stat-icon {{ background:#fee2e2; color:#b91c1c; }}
+      .stat-med .stat-icon {{ background:#fef3c7; color:#92400e; }}
+      .stat-low .stat-icon {{ background:#dcfce7; color:#166534; }}
+      .stat-value {{ font-size:22px; font-weight:700; }}
+      .stat-label {{ color:var(--muted); font-size:12px; }}
+
+      .table-wrapper {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; margin:20px 0; overflow:auto; box-shadow:0 10px 24px rgba(0,0,0,.05); }}
+      .table {{ width:100%; border-collapse:separate; border-spacing:0; }}
+      .table th, .table td {{ padding:12px 14px; font-size:14px; }}
+      .table thead th {{ position:sticky; top:0; background:#f9fafb; border-bottom:1px solid var(--line); text-align:left; font-weight:600; }}
+      .table tbody tr:nth-child(even) {{ background:#fcfdff; }}
+      .table tbody tr:hover {{ background:#f5f7ff; }}
+
+      .badge {{ padding:4px 8px; border-radius:999px; font-size:12px; font-weight:600; }}
       .badge-high {{ background:#fee2e2; color:#b91c1c; }}
       .badge-med {{ background:#fef3c7; color:#92400e; }}
       .badge-low {{ background:#dcfce7; color:#166534; }}
+
       .btn {{ padding:8px 12px; border:1px solid #d1d5db; background:#ffffff; color:#111827; border-radius:8px; cursor:pointer; }}
       .btn:hover {{ background:#f3f4f6; }}
+      .btn-outline {{ padding:8px 12px; border:1px solid rgba(255,255,255,.7); background:transparent; color:#ffffff; border-radius:8px; cursor:pointer; }}
+      .btn-outline:hover {{ background:rgba(255,255,255,.12); }}
 
     </style></head>
     <body>
       <header>
-        <div>FraudGuard for Bank of Anthos</div>
-        <div>
-          <span class=\"pill\" style=\"background:#fee2e2;color:#b91c1c\">🔴 High Risk: {len(high)}</span>
-          <span class=\"pill\" style=\"background:#fff3cd;color:#92400e\">⚠️ Medium Risk: {len(med)}</span>
-          <span class=\"pill\" style=\"background:#dcfce7;color:#166534\">⚡ Low Risk: {len(low)}</span>
-          <a href=\"/logout\" class=\"pill\" style=\"background:#e5e7eb;color:#374151;text-decoration:none;margin-left:8px;\">Logout</a>
+        <div class=\"header-inner container\">
+          <div class=\"brand\">FraudGuard for Bank of Anthos</div>
+          <div>
+            <span class=\"pill\" style=\"background:#fee2e2;color:#b91c1c\">🔴 High Risk: {len(high)}</span>
+            <span class=\"pill\" style=\"background:#fef3c7;color:#92400e\">⚠️ Medium Risk: {len(med)}</span>
+            <span class=\"pill\" style=\"background:#dcfce7;color:#166534\">⚡ Low Risk: {len(low)}</span>
+            <a href=\"/logout\" class=\"btn-outline\" style=\"margin-left:8px;text-decoration:none;\">Logout</a>
+          </div>
         </div>
       </header>
-      <table class=\"table\">
-        <thead><tr><th>Date (UTC)</th><th>Time</th><th>Amount</th><th>Merchant/Account</th><th>Risk</th><th>AI Analysis</th><th>Action</th></tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
+      <main class=\"container\">
+        <section class=\"stats\">
+          <div class=\"stat-card stat-high\">
+            <div class=\"stat-icon\">🔴</div>
+            <div>
+              <div class=\"stat-value\">{len(high)}</div>
+              <div class=\"stat-label\">High Risk</div>
+            </div>
+          </div>
+          <div class=\"stat-card stat-med\">
+            <div class=\"stat-icon\">⚠️</div>
+            <div>
+              <div class=\"stat-value\">{len(med)}</div>
+              <div class=\"stat-label\">Medium Risk</div>
+            </div>
+          </div>
+          <div class=\"stat-card stat-low\">
+            <div class=\"stat-icon\">⚡</div>
+            <div>
+              <div class=\"stat-value\">{len(low)}</div>
+              <div class=\"stat-label\">Low Risk</div>
+            </div>
+          </div>
+        </section>
+        <div class=\"table-wrapper\">
+          <table class=\"table\">
+            <thead><tr><th>Date (UTC)</th><th>Time</th><th>Amount</th><th>Merchant/Account</th><th>Risk</th><th>AI Analysis</th><th>Action</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+      </main>
       <script>
         async function notify(txId, riskScore, explanation) {{
           try {{
