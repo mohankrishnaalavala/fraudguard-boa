@@ -18,6 +18,8 @@ container:
       value: "http://frontend.boa.svc.cluster.local:80"
     - name: RATE_LIMIT_PER_MINUTE
       value: "100"
+    - name: BOA_MONITOR_URL
+      value: "http://boa-monitor-workload.fraudguard.svc.cluster.local:8080"
 
 resources:
   requests:
