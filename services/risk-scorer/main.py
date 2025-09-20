@@ -234,12 +234,15 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
         logger.warning("history_fetch_failed", source="mcp", account_id=account_id, error=str(e))
 
     # 2) Bank of Anthos (optional) - Additional historical context
-    try:
-        boa_hist = await fetch_boa_history_for_account(account_id, limit=limit)
-        combined.extend(boa_hist)
-        logger.info("boa_history_added", account_id=account_id, boa_count=len(boa_hist), total_count=len(combined))
-    except Exception as e:
-        logger.info("boa_history_not_used", account_id=account_id, error=str(e))
+    if RAG_INCLUDE_BOA:
+        try:
+            boa_hist = await fetch_boa_history_for_account(account_id, limit=limit)
+            combined.extend(boa_hist)
+            logger.info("boa_history_added", account_id=account_id, boa_count=len(boa_hist), total_count=len(combined))
+        except Exception as e:
+            logger.info("boa_history_not_used", account_id=account_id, error=str(e))
+    else:
+        logger.info("boa_history_skipped", account_id=account_id)
 
     # Deduplicate by minimal signature (timestamp+amount+merchant)
     seen = set()

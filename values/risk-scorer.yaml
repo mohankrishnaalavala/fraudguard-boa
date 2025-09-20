@@ -33,6 +33,7 @@ container:
     - name: FORCE_GL_OAUTH
       value: "false"
     - name: RAG_INCLUDE_BOA
+      value: "false"
       value: "true"
     - name: BOA_USERSERVICE_URL
       value: "http://userservice.boa.svc.cluster.local:8080"
@@ -65,7 +66,7 @@ service:
   port: 8080
 
 hpa:
-  enabled: true
+  enabled: false
   minReplicas: 1
   maxReplicas: 5
   targetCPUUtilizationPercentage: 70
