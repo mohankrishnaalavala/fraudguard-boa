@@ -253,19 +253,31 @@ def _render_dashboard(transactions: list) -> str:
         return "; ".join(parts)
 
     # Build unified table rows (newest first) with required columns
+    def _html_escape(s: str) -> str:
+        s = s or ""
+        return (s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
+                 .replace('"', "&quot;")
+                 .replace("'", "&#x27;")
+                 .replace("`", "&#96;"))
+
     sorted_tx = sorted(transactions, key=lambda t: t.get("timestamp", ""), reverse=True)
     rows = "".join(
         (
-            (lambda dt: f"<tr>"
-                         f"<td>{_fmt_date(dt)}</td>"
-                         f"<td>{_fmt_time(dt)}</td>"
-                         f"<td>{_fmt_amt(t.get('amount',0))}</td>"
-                         f"<td>{t.get('merchant','')}</td>"
-                         f"<td>{_badge(t.get('risk_level'))}</td>"
-                         f"<td>{_ai_analysis(t)}</td>"
-                         f"<td><button class='btn' onclick=\"notify('{t.get('transaction_id','')}',{float(t.get('risk_score') or 0):.2f},`{(t.get('risk_explanation') or _ai_analysis(t)).replace('`','\u0060')}`)\">Notify</button></td>"
-                         f"</tr>")
-             (_p_ts(t.get('timestamp','')))
+            (lambda dt: (
+                (lambda analysis, esc_expl: (
+                    f"<tr>"
+                    f"<td>{_fmt_date(dt)}</td>"
+                    f"<td>{_fmt_time(dt)}</td>"
+                    f"<td>{_fmt_amt(t.get('amount',0))}</td>"
+                    f"<td>{t.get('merchant','')}</td>"
+                    f"<td>{_badge(t.get('risk_level'))}</td>"
+                    f"<td>{analysis}</td>"
+                    f"<td><button class='btn' onclick=\"notify('{t.get('transaction_id','')}',{float(t.get('risk_score') or 0):.2f},'{esc_expl}')\">Notify</button></td>"
+                    f"</tr>"
+                ))(_ai_analysis(t), _html_escape(t.get('risk_explanation') or _ai_analysis(t)))
+            ))(_p_ts(t.get('timestamp','')))
         )
         for t in sorted_tx[:100]
     )
