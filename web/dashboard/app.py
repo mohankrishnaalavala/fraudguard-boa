@@ -70,19 +70,24 @@ def get_action_icon(action: str) -> str:
 def fetch_transactions() -> List[Dict[str, Any]]:
     """Fetch recent transactions from MCP Gateway (sync)"""
     try:
-        logger.info("fetching_transactions", url=f"{MCP_GATEWAY_URL}/api/recent-transactions")
+        logger.debug("fetching_transactions", url=f"{MCP_GATEWAY_URL}/api/recent-transactions")
 
         with httpx.Client(timeout=15.0) as client:
             response = client.get(f"{MCP_GATEWAY_URL}/api/recent-transactions")
 
-        logger.info(
+        logger.debug(
             "mcp_gateway_response",
             status_code=response.status_code,
         )
 
         response.raise_for_status()
         data = response.json()
-        transactions = data.get("transactions", [])
+        # Accept both shapes from MCP Gateway: either an object { transactions: [...] }
+        # or a raw array [...]. Be tolerant to ensure metrics and records stay in sync.
+        if isinstance(data, list):
+            transactions = data
+        else:
+            transactions = data.get("transactions", [])
 
         # Log only safe summary to avoid serialization issues
         first_id = transactions[0].get("transaction_id") if transactions and isinstance(transactions[0], dict) else None
@@ -107,6 +112,19 @@ def fetch_transactions() -> List[Dict[str, Any]]:
             txn["risk_color"] = get_risk_color(score)
             txn["risk_percentage"] = int(score * 100)
 
+
+            # Normalize/derive risk_level if missing or pending to keep UI and metrics consistent
+            level = str(txn.get("risk_level", "")).lower().strip()
+            if level not in {"high", "medium", "low"}:
+                # Match gateway thresholds
+                if score > 0.7:
+                    level = "high"
+                elif score > 0.4:
+                    level = "medium"
+                else:
+                    level = "low"
+                txn["risk_level"] = level
+
             # Format timestamp
             if txn.get("timestamp"):
                 try:
@@ -117,7 +135,7 @@ def fetch_transactions() -> List[Dict[str, Any]]:
                     txn["formatted_time"] = ts.strftime("%H:%M:%S")
                     txn["formatted_date"] = ts.strftime("%Y-%m-%d")
                 except Exception as ts_error:
-                    logger.info("timestamp_parse_skip", error=str(ts_error))
+                    logger.debug("timestamp_parse_skip", error=str(ts_error))
                     txn["formatted_time"] = "Unknown"
                     txn["formatted_date"] = "Unknown"
 
@@ -185,9 +203,9 @@ def dashboard():
     try:
         transactions = fetch_transactions()
 
-        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0, "normal": 0}
+        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0}
         for txn in transactions:
-            risk_level = str(txn.get("risk_level", "normal")).lower()
+            risk_level = str(txn.get("risk_level", "")).lower()
             if risk_level == "high":
                 stats["high_risk"] += 1
             elif risk_level == "medium":
@@ -195,7 +213,8 @@ def dashboard():
             elif risk_level == "low":
                 stats["low_risk"] += 1
             else:
-                stats["normal"] += 1
+                # default any other value into low to maintain tri-level classification
+                stats["low_risk"] += 1
 
         current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         return render_template(
@@ -224,9 +243,9 @@ def api_stats():
     """API endpoint for fetching dashboard statistics"""
     try:
         transactions = fetch_transactions()
-        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0, "normal": 0, "total": len(transactions)}
+        stats = {"high_risk": 0, "medium_risk": 0, "low_risk": 0, "total": len(transactions)}
         for txn in transactions:
-            risk_level = str(txn.get("risk_level", "normal")).lower()
+            risk_level = str(txn.get("risk_level", "")).lower()
             if risk_level == "high":
                 stats["high_risk"] += 1
             elif risk_level == "medium":
@@ -234,7 +253,7 @@ def api_stats():
             elif risk_level == "low":
                 stats["low_risk"] += 1
             else:
-                stats["normal"] += 1
+                stats["low_risk"] += 1
         return jsonify(stats)
     except Exception as e:
         logger.error("api_stats_failed", error=str(e))

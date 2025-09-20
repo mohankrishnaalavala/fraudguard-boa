@@ -7,7 +7,7 @@ metadata:
     kubernetes.io/ingress.class: "gce"
     kubernetes.io/ingress.global-static-ip-name: "fraudguard-ip"
     networking.gke.io/managed-certificates: "fraudguard-ssl-cert"
-    kubernetes.io/ingress.allow-http: "false"
+    kubernetes.io/ingress.allow-http: "true"
 spec:
   rules:
   - host: fraudguard.mohankrishna.site
@@ -72,7 +72,8 @@ spec:
     targetPort: 8080
     protocol: TCP
   selector:
-    app: dashboard
+    app.kubernetes.io/instance: dashboard
+    app.kubernetes.io/name: dashboard
 ---
 apiVersion: v1
 kind: Service
@@ -88,4 +89,5 @@ spec:
     targetPort: 8080
     protocol: TCP
   selector:
-    app: mcp-gateway
+    app.kubernetes.io/instance: mcp-gateway
+    app.kubernetes.io/name: mcp-gateway
