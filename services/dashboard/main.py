@@ -285,9 +285,9 @@ def _render_dashboard(transactions: list) -> str:
         (
             (lambda dt: (
                 (lambda analysis, esc_expl: (
-                    f"<tr>"
-                    f"<td>{_fmt_date(dt)}</td>"
-                    f"<td>{_fmt_time(dt)}</td>"
+                    f"<tr data-risk='{(t.get('risk_level') or '').lower()}' data-ts='{int((_p_ts(t.get('timestamp','')) or dt).timestamp())}' data-amt='{float(t.get('amount',0) or 0):.2f}'>"
+                    f"<td class='col-date'>{_fmt_date(dt)}</td>"
+                    f"<td class='col-time'>{_fmt_time(dt)}</td>"
                     f"<td>{_fmt_amt(t.get('amount',0))}</td>"
                     f"<td>{t.get('merchant','')}</td>"
                     f"<td>{_badge(t.get('risk_level'))}</td>"
@@ -353,6 +353,24 @@ def _render_dashboard(transactions: list) -> str:
       .btn-outline {{ padding:8px 12px; border:1px solid rgba(255,255,255,.7); background:transparent; color:#ffffff; border-radius:8px; cursor:pointer; }}
       .btn-outline:hover {{ background:rgba(255,255,255,.12); }}
 
+      /* Controls & chips */
+      .controls {{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:16px 0; }}
+      .chip {{ padding:6px 10px; border-radius:999px; border:1px solid var(--line); background:var(--surface); cursor:pointer; font-size:12px; }}
+      .chip.active {{ background:#e0e7ff; border-color:#c7d2fe; }}
+      .date-group .custom-range input {{ padding:6px 8px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:inherit; }}
+      .toggle-label {{ font-size:12px; color:var(--muted); }}
+
+      /* Table columns */
+      .col-date {{ white-space:nowrap; min-width:110px; }}
+      .col-time {{ white-space:nowrap; min-width:72px; }}
+      th.sortable {{ cursor:pointer; user-select:none; }}
+
+      /* Dark mode */
+      body.dark {{ --bg:#0b1220; --surface:#0f172a; --line:#1f2a44; color:#e5e7eb; }}
+      body.dark .table thead th {{ background:#0f1b2e; border-bottom:1px solid var(--line); }}
+      body.dark .table tbody tr:nth-child(even) {{ background:#0e1626; }}
+      body.dark .table tbody tr:hover {{ background:#12203a; }}
+
     </style></head>
     <body>
       <header>
@@ -390,9 +408,31 @@ def _render_dashboard(transactions: list) -> str:
             </div>
           </div>
         </section>
+        <section class="controls">
+          <div class="chip-group" id="riskChips">
+            <button class="chip active" data-risk="high">High</button>
+            <button class="chip active" data-risk="medium">Medium</button>
+            <button class="chip active" data-risk="low">Low</button>
+          </div>
+          <div class="date-group">
+            <button class="chip" data-range="today">Today</button>
+            <button class="chip" data-range="7">Last 7 days</button>
+            <button class="chip" data-range="30">Last 30 days</button>
+            <span class="custom-range">
+              <input type="date" id="startDate">
+              <span style="color:var(--muted);">to</span>
+              <input type="date" id="endDate">
+              <button class="btn" id="applyRange">Apply</button>
+            </span>
+          </div>
+          <div style="flex:1"></div>
+          <div class="toggle">
+            <label class="toggle-label"><input type="checkbox" id="darkToggle"> Dark mode</label>
+          </div>
+        </section>
         <div class=\"table-wrapper\">
           <table class=\"table\">
-            <thead><tr><th>Date (UTC)</th><th>Time</th><th>Amount</th><th>Merchant/Account</th><th>Risk</th><th>AI Analysis</th><th>Action</th></tr></thead>
+            <thead><tr><th class="sortable" data-sort="date">Date (UTC)</th><th class="sortable" data-sort="time">Time</th><th class="sortable" data-sort="amount">Amount</th><th>Merchant/Account</th><th class="sortable" data-sort="risk">Risk</th><th>AI Analysis</th><th>Action</th></tr></thead>
             <tbody>{rows}</tbody>
           </table>
         </div>
@@ -411,6 +451,104 @@ def _render_dashboard(transactions: list) -> str:
             alert('Notify failed');
           }}
         }}
+
+        (function() {{
+          const tbody = document.querySelector('tbody');
+          const rows = Array.from(tbody.querySelectorAll('tr'));
+          let activeRisks = new Set(['high','medium','low']);
+          let range = {{ min: -Infinity, max: Infinity }};
+          let sort = {{ key: 'date', dir: 'desc' }}; // default
+
+          function intAttr(el, name) {{ return parseInt(el.dataset[name], 10) || 0; }}
+          function riskRank(r) {{ return r==='high'?3:(r==='medium'?2:1); }}
+
+          function applyFilters() {{
+            rows.forEach(tr => {{
+              const risk = (tr.dataset.risk||'').toLowerCase();
+              const ts = intAttr(tr, 'ts');
+              const show = activeRisks.has(risk) && ts >= range.min && ts <= range.max;
+              tr.style.display = show ? '' : 'none';
+            }});
+          }}
+
+          function applySort() {{
+            const key = sort.key; const dir = sort.dir==='asc'?1:-1;
+            const visible = rows.filter(tr => tr.style.display !== 'none');
+            visible.sort((a,b) => {{
+              if (key==='amount') return (parseFloat(a.dataset.amt)-parseFloat(b.dataset.amt))*dir;
+              if (key==='date' || key==='time') return (intAttr(a,'ts')-intAttr(b,'ts'))*dir;
+              if (key==='risk') return (riskRank(a.dataset.risk)-riskRank(b.dataset.risk))*dir;
+              return 0;
+            }});
+            visible.forEach(tr => tbody.appendChild(tr));
+          }}
+
+          function refresh() {{ applyFilters(); applySort(); }}
+
+          // Risk chips
+          document.querySelectorAll('.chip-group [data-risk]').forEach(btn => {{
+            btn.addEventListener('click', () => {{
+              btn.classList.toggle('active');
+              const r = btn.dataset.risk;
+              if (btn.classList.contains('active')) activeRisks.add(r); else activeRisks.delete(r);
+              if (activeRisks.size===0) {{
+                document.querySelectorAll('.chip-group [data-risk]').forEach(b => b.classList.add('active'));
+                activeRisks = new Set(['high','medium','low']);
+              }}
+              refresh();
+            }});
+          }});
+
+          // Date quick ranges
+          function setRangeDays(days) {{
+            const now = new Date();
+            const max = Math.floor(now.getTime()/1000);
+            const min = (days===0)
+              ? Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())/1000)
+              : max - (days*24*3600);
+            range = {{ min, max }};
+            refresh();
+          }}
+          document.querySelectorAll('[data-range]').forEach(btn => {{
+            btn.addEventListener('click', () => {{
+              const v = btn.dataset.range;
+              if (v==='today') setRangeDays(0); else setRangeDays(parseInt(v,10));
+            }});
+          }});
+          const applyBtn = document.getElementById('applyRange');
+          if (applyBtn) {{
+            applyBtn.addEventListener('click', () => {{
+              const s = document.getElementById('startDate').value;
+              const e = document.getElementById('endDate').value;
+              if (s) {{ const sd = new Date(s+'T00:00:00Z'); range.min = Math.floor(sd.getTime()/1000); }}
+              if (e) {{ const ed = new Date(e+'T23:59:59Z'); range.max = Math.floor(ed.getTime()/1000); }}
+              refresh();
+            }});
+          }}
+
+          // Sorting
+          document.querySelectorAll('th.sortable').forEach(th => {{
+            th.addEventListener('click', () => {{
+              const key = th.dataset.sort;
+              if (sort.key === key) sort.dir = (sort.dir==='asc'?'desc':'asc'); else {{ sort.key = key; sort.dir = 'asc'; }}
+              // indicators
+              document.querySelectorAll('th.sortable').forEach(x => x.textContent = x.textContent.replace(/[▲▼]$/, ''));
+              th.textContent = th.textContent.replace(/[▲▼]$/, '') + (sort.dir==='asc'?' ▲':' ▼');
+              applySort();
+            }});
+          }});
+
+          // Dark mode
+          const darkToggle = document.getElementById('darkToggle');
+          if (darkToggle) {{
+            darkToggle.addEventListener('change', () => {{
+              document.body.classList.toggle('dark', darkToggle.checked);
+            }});
+          }}
+
+          // initial apply (keeps default order)
+          applyFilters();
+        }})();
       </script>
 
     </body>
