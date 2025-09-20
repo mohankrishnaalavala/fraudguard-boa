@@ -144,9 +144,17 @@ def store_transaction(transaction: dict) -> bool:
                         tx_type = None
 
                 conn.execute("""
-                    INSERT OR REPLACE INTO transactions
+                    INSERT INTO transactions
                     (transaction_id, account_id, amount, merchant, category, timestamp, location, created_at, tx_type)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(transaction_id) DO UPDATE SET
+                        account_id=excluded.account_id,
+                        amount=excluded.amount,
+                        merchant=excluded.merchant,
+                        category=excluded.category,
+                        timestamp=excluded.timestamp,
+                        location=excluded.location,
+                        tx_type=excluded.tx_type
                 """, (
                     transaction["transaction_id"],
                     transaction.get("account_id", transaction.get("user_id", "unknown")),
@@ -574,7 +582,7 @@ async def get_all_recent_transactions(
                     SELECT transaction_id, account_id, amount, merchant, category,
                            timestamp, location, risk_score, risk_level, risk_explanation, created_at, tx_type
                     FROM transactions
-                    ORDER BY created_at DESC
+                    ORDER BY timestamp DESC, created_at DESC
                     LIMIT ?
                     """,
                     (limit,)
