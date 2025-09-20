@@ -64,7 +64,7 @@ networkPolicy:
     - to:
         - namespaceSelector:
             matchLabels:
-              name: fraudguard
+              kubernetes.io/metadata.name: fraudguard
       ports:
         - protocol: TCP
           port: 8080

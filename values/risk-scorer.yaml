@@ -32,8 +32,15 @@ container:
       value: "true"
     - name: FORCE_GL_OAUTH
       value: "true"
+    - name: RAG_INCLUDE_BOA
+      value: "true"
+    - name: BOA_USERSERVICE_URL
+      value: "http://userservice.boa.svc.cluster.local:8080"
+    - name: BOA_HISTORY_URL
+      value: "http://transactionhistory.boa.svc.cluster.local:8080"
   envFrom:
     - name: risk-scorer-gemini
+    - name: boa-api-credentials
 
 # Give the container more startup time before readiness/liveness kick in
 startupProbe:
@@ -92,6 +99,14 @@ networkPolicy:
         - namespaceSelector:
             matchLabels:
               name: fraudguard
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow outbound to Bank of Anthos services
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: boa
       ports:
         - protocol: TCP
           port: 8080

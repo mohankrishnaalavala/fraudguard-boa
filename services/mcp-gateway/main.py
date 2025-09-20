@@ -101,6 +101,9 @@ def init_database():
                 if "risk_explanation" not in cols:
                     conn.execute("ALTER TABLE transactions ADD COLUMN risk_explanation TEXT")
                     logger.info("schema_migrated_add_column", column="risk_explanation")
+                if "tx_type" not in cols:
+                    conn.execute("ALTER TABLE transactions ADD COLUMN tx_type TEXT")
+                    logger.info("schema_migrated_add_column", column="tx_type")
             except Exception as mig_err:
                 logger.warning("schema_migration_failed", error=str(mig_err))
             conn.commit()
@@ -114,10 +117,20 @@ def store_transaction(transaction: dict) -> bool:
     try:
         with db_lock:
             with sqlite3.connect(DATABASE_PATH) as conn:
+                # Normalize/Infer tx_type if missing
+                tx_type = transaction.get("type")
+                if not tx_type:
+                    try:
+                        merch = str(transaction.get("merchant", ""))
+                        if merch.startswith("acct:"):
+                            tx_type = "debit"
+                    except Exception:
+                        tx_type = None
+
                 conn.execute("""
                     INSERT OR REPLACE INTO transactions
-                    (transaction_id, account_id, amount, merchant, category, timestamp, location, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (transaction_id, account_id, amount, merchant, category, timestamp, location, created_at, tx_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     transaction["transaction_id"],
                     transaction.get("account_id", transaction.get("user_id", "unknown")),
@@ -126,7 +139,8 @@ def store_transaction(transaction: dict) -> bool:
                     transaction.get("category", "unknown"),
                     transaction["timestamp"],
                     transaction.get("location"),
-                    datetime.utcnow().isoformat()
+                    datetime.utcnow().isoformat(),
+                    tx_type
                 ))
                 conn.commit()
                 logger.info("transaction_stored", transaction_id=transaction["transaction_id"])
@@ -145,7 +159,8 @@ async def trigger_risk_analysis(transaction: dict):
         # Prefer external AI service (risk-scorer) to get score + rationale
         try:
             risk_scorer_url = os.getenv("RISK_SCORER_URL", "http://risk-scorer.fraudguard.svc.cluster.local:8080")
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # Allow more time for Vertex-backed analysis and surface error details
+            async with httpx.AsyncClient(timeout=25.0) as client:
                 response = await client.post(
                     f"{risk_scorer_url}/analyze",
                     json=transaction
@@ -157,9 +172,12 @@ async def trigger_risk_analysis(transaction: dict):
                 else:
                     logger.warning("risk_scorer_non_200", status_code=response.status_code, body=response.text)
         except Exception as external_error:
-            logger.warning("external_risk_analysis_failed",
-                           transaction_id=transaction.get("transaction_id"),
-                           error=str(external_error))
+            logger.warning(
+                "external_risk_analysis_failed",
+                transaction_id=transaction.get("transaction_id"),
+                error_type=type(external_error).__name__,
+                error=str(external_error)
+            )
 
         # Fallback to internal heuristic scoring if needed
         if not risk_explanation:
@@ -181,52 +199,28 @@ async def trigger_risk_analysis(transaction: dict):
                      error=str(e))
 
 def calculate_risk_score_direct(transaction: dict) -> tuple[float, str]:
-    """Heuristic risk score with brief explanation (fallback when AI unavailable)"""
+    """Heuristic risk score using only BoA fields (amount, timestamp)."""
     try:
         amount = float(transaction.get("amount", 0))
-        merchant = transaction.get("merchant", "").lower()
-        timestamp = transaction.get("timestamp", "")
+        timestamp = str(transaction.get("timestamp", ""))
 
-        # Base risk score
         risk_score = 0.1
         reasons = []
 
-        # Amount-based risk
+        # Amount-based risk only
         if amount > 2000:
-            risk_score += 0.5
-            reasons.append(f"High amount ${amount}")
+            risk_score += 0.5; reasons.append(f"High amount ${amount}")
         elif amount > 1000:
-            risk_score += 0.4
-            reasons.append(f"Large amount ${amount}")
+            risk_score += 0.4; reasons.append(f"Large amount ${amount}")
         elif amount > 500:
-            risk_score += 0.2
-            reasons.append(f"Medium amount ${amount}")
-
-        # Merchant-based risk
-        suspicious_keywords = ["suspicious", "unknown", "cash", "atm", "foreign", "advance"]
-        if any(keyword in merchant for keyword in suspicious_keywords):
-            risk_score += 0.3
-            reasons.append("Suspicious merchant type")
+            risk_score += 0.2; reasons.append(f"Medium amount ${amount}")
 
         # Time-based risk (late night/early morning)
-        if "t02:" in timestamp.lower() or "t03:" in timestamp.lower() or "t01:" in timestamp.lower():
-            risk_score += 0.2
-            reasons.append("Late night activity")
+        if any(h in timestamp.lower() for h in ["t01:", "t02:", "t03:"]):
+            risk_score += 0.2; reasons.append("Late night activity")
 
-        # Electronics purchases
-        if "electronics" in merchant:
-            risk_score += 0.1
-            reasons.append("Electronics merchant")
-
-        # Coffee shops and restaurants are lower risk
-        if any(word in merchant for word in ["coffee", "restaurant", "cafe"]):
-            risk_score -= 0.1
-            reasons.append("Common merchant")
-
-        # Cap the risk score
         risk_score = min(max(risk_score, 0.05), 0.95)
         explanation = ("; ".join(reasons) or "Standard transaction pattern")
-
         return round(risk_score, 2), explanation
 
     except Exception as e:
@@ -261,7 +255,7 @@ def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("""
                     SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level, risk_explanation
+                           timestamp, location, risk_score, risk_level, risk_explanation, tx_type
                     FROM transactions
                     WHERE account_id = ?
                     ORDER BY timestamp DESC
@@ -280,7 +274,8 @@ def get_account_transactions(account_id: str, limit: int = 10) -> List[dict]:
                         "location": row["location"],
                         "risk_score": row["risk_score"],
                         "risk_level": row["risk_level"],
-                        "risk_explanation": row["risk_explanation"]
+                        "risk_explanation": row["risk_explanation"],
+                        "type": row["tx_type"]
                     })
 
                 logger.info("transactions_retrieved", account_id=account_id, count=len(transactions))
@@ -299,6 +294,7 @@ class Transaction(BaseModel):
     category: str = Field(..., description="Transaction category")
     timestamp: datetime = Field(..., description="Transaction timestamp")
     location: Optional[str] = Field(None, description="Transaction location")
+    type: Optional[str] = Field(None, description="Transaction type (debit/credit)")
 
 class TransactionRequest(BaseModel):
     """Transaction creation request"""
@@ -307,6 +303,7 @@ class TransactionRequest(BaseModel):
     merchant: str = Field(..., description="Merchant name")
     user_id: str = Field(..., description="User ID")
     timestamp: datetime = Field(..., description="Transaction timestamp")
+    type: Optional[str] = Field(None, description="Transaction type (debit/credit)")
 
 class Account(BaseModel):
     """Account model"""
@@ -315,7 +312,24 @@ class Account(BaseModel):
     account_type: str = Field(..., description="Account type")
 
 def check_rate_limit(client_ip: str) -> bool:
-    """Simple rate limiting check"""
+    """Simple rate limiting check with internal bypass.
+
+    We bypass rate limiting for internal cluster callers by default to allow
+    service-to-service traffic (e.g., risk-scorer) to aggregate history without
+    tripping 429s. Control via DISABLE_RATE_LIMIT_INTERNAL env var (default true).
+    """
+    # Internal bypass
+    disable_internal_rl = os.getenv("DISABLE_RATE_LIMIT_INTERNAL", "true").lower() == "true"
+    internal_prefixes = (
+        "10.",      # k8s pod CIDR
+        "127.0.0.1", # local
+        "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."
+    )
+    if disable_internal_rl and any(client_ip.startswith(p) for p in internal_prefixes):
+        logger.info("rate_limit_bypass_internal", client_ip=client_ip)
+        return True
+
+    # Token bucket per IP
     now = time.time()
     minute_ago = now - 60
 
@@ -323,16 +337,13 @@ def check_rate_limit(client_ip: str) -> bool:
         rate_limit_store[client_ip] = []
 
     # Clean old entries
-    rate_limit_store[client_ip] = [
-        timestamp for timestamp in rate_limit_store[client_ip]
-        if timestamp > minute_ago
-    ]
+    rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if t > minute_ago]
 
     # Check limit
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT_PER_MINUTE:
         return False
 
-    # Add current request
+    # Add current request and allow
     rate_limit_store[client_ip].append(now)
     return True
 
@@ -404,7 +415,7 @@ async def get_account(account_id: str, client_ip: str = Depends(get_client_ip)):
 @app.get("/accounts/{account_id}/transactions", response_model=List[Transaction])
 async def get_recent_transactions(
     account_id: str,
-    limit: int = 10,
+    limit: int = 50,
     client_ip: str = Depends(get_client_ip)
 ):
     """Get recent transactions for an account (read-only)"""
@@ -414,9 +425,17 @@ async def get_recent_transactions(
 
     try:
         logger.info("transactions_requested", account_id=account_id, limit=limit, client_ip=client_ip)
+        # Clamp retention to last 50 per account for analysis context
+        try:
+            limit = max(1, min(int(limit), 50))
+        except Exception:
+            limit = 50
+
 
         # Get real transactions from database
         transaction_data = get_account_transactions(account_id, limit)
+
+
 
         transactions = []
         for txn_data in transaction_data:
@@ -474,6 +493,11 @@ async def create_transaction(
         )
 
         # Store transaction in database
+        # Use model_dump()/dict() to reliably extract optional fields like `type`
+        try:
+            raw = transaction.model_dump()
+        except AttributeError:
+            raw = transaction.dict()
         transaction_data = {
             "transaction_id": transaction.transaction_id,
             "account_id": transaction.user_id,  # Map user_id to account_id
@@ -481,7 +505,8 @@ async def create_transaction(
             "merchant": transaction.merchant,
             "category": "unknown",  # Could be enhanced to detect category
             "timestamp": transaction.timestamp.isoformat(),
-            "location": None  # Could be enhanced with location detection
+            "location": None,  # Could be enhanced with location detection
+            "type": raw.get("type")
         }
 
         if not store_transaction(transaction_data):
@@ -510,45 +535,115 @@ async def get_all_recent_transactions(
     limit: int = 20,
     client_ip: str = Depends(get_client_ip)
 ):
-    """Get all recent transactions across all accounts for dashboard"""
+    """Get all recent transactions across all accounts for dashboard.
+    Returns: {"transactions": [...]} with newest first.
+    """
+    # Rate limit
     if not check_rate_limit(client_ip):
         logger.warning("rate_limit_exceeded", client_ip=client_ip)
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    # Clamp limit defensively (dashboard uses default 20)
+    try:
+        limit = max(1, min(int(limit), 50))
+    except Exception:
+        limit = 20
 
     try:
         with db_lock:
             with sqlite3.connect(DATABASE_PATH) as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute("""
+                cursor = conn.execute(
+                    """
                     SELECT transaction_id, account_id, amount, merchant, category,
-                           timestamp, location, risk_score, risk_level, risk_explanation, created_at
+                           timestamp, location, risk_score, risk_level, risk_explanation, created_at, tx_type
                     FROM transactions
                     ORDER BY created_at DESC
                     LIMIT ?
-                """, (limit,))
+                    """,
+                    (limit,)
+                )
+                rows = cursor.fetchall()
 
-                transactions = []
-                for row in cursor.fetchall():
-                    transactions.append({
-                        "transaction_id": row["transaction_id"],
-                        "account_id": row["account_id"],
-                        "amount": row["amount"],
-                        "merchant": row["merchant"],
-                        "category": row["category"],
-                        "timestamp": row["timestamp"],
-                        "location": row["location"],
-                        "risk_score": row["risk_score"],
-                        "risk_level": row["risk_level"] or "pending",
-                        "risk_explanation": row["risk_explanation"],
-                        "created_at": row["created_at"]
-                    })
+        transactions = []
+        for row in rows:
+            txn = {
+                "transaction_id": row["transaction_id"],
+                "account_id": row["account_id"],
+                "amount": row["amount"],
+                "merchant": row["merchant"],
+                "category": row["category"],
+                "timestamp": row["timestamp"],
+                "location": row["location"],
+                "risk_score": row["risk_score"],
+                "risk_level": row["risk_level"] or "pending",
+                "risk_explanation": row["risk_explanation"],
+                "created_at": row["created_at"],
+                "type": row["tx_type"],
+            }
+            transactions.append(txn)
 
-                logger.info("recent_transactions_retrieved", count=len(transactions))
-                return {"transactions": transactions}
+        logger.info("recent_transactions_retrieved", count=len(transactions))
+        return {"transactions": transactions}
 
     except Exception as e:
         logger.error("recent_transactions_failed", error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/mcp/schema")
+async def mcp_schema():
+    """Lightweight MCP-style schema for demo tooling."""
+    return {
+        "version": "0.1",
+        "tools": [
+            {
+                "name": "mcp.list_transactions",
+                "description": "List recent transactions for an account (max 50).",
+                "input": {"type": "object", "properties": {"account_id": {"type": "string"}, "limit": {"type": "integer"}}},
+                "output": {"type": "array", "items": {"type": "object"}}
+            },
+            {
+                "name": "mcp.analyze_transaction",
+                "description": "Run risk analysis for a transaction via risk-scorer.",
+                "input": {"type": "object", "properties": {"transaction": {"type": "object"}}},
+                "output": {"type": "object"}
+            }
+        ]
+    }
+
+@app.get("/mcp/transactions/{account_id}")
+async def mcp_list_transactions(account_id: str, limit: int = 50, client_ip: str = Depends(get_client_ip)):
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip, account_id=account_id)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        limit = max(1, min(int(limit), 50))
+        rows = get_account_transactions(account_id, limit)
+        # Return raw dicts (already sanitized by DB layer)
+        return rows
+    except Exception as e:
+        logger.error("mcp_list_transactions_failed", account_id=account_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal error")
+
+@app.post("/mcp/analyze")
+async def mcp_analyze(body: dict, client_ip: str = Depends(get_client_ip)):
+    if not check_rate_limit(client_ip):
+        logger.warning("rate_limit_exceeded", client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    try:
+        txn = body.get("transaction", {})
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{os.getenv('RISK_SCORER_URL','http://risk-scorer.fraudguard.svc.cluster.local:8080')}/analyze",
+                json=txn,
+                timeout=15.0
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.error("mcp_analyze_failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Analyze forwarding failed")
+
 
 @app.on_event("startup")
 async def startup_event():
