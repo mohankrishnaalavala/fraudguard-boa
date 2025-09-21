@@ -63,8 +63,11 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 ---
 
 ## Screens (replace with captures)
-- BoA transfer — _placeholder_  
-- FraudGuard dashboard (bucketed result) — _placeholder_
+- BoA transfer
+![BoA transfer](images/boatransaction.png)
+- FraudGuard dashboard 
+![FraudGuard login](images/login.png)
+![FraudGuard dashboard](images/dashboard.png)
 
 ---
 
