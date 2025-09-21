@@ -57,7 +57,7 @@ Use the BoA demo credentials shown on the BoA login page of your deployment (do 
 - Expand model prompts and feature engineering; add BigQuery historical store
 - Vertex AI as default path (config toggle already present)
 
-
+## Architecture diagram 
 ![FraudGuard Architecture](images/architecture.png)
 ---
 
