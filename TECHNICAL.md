@@ -78,6 +78,21 @@
 - Verifying AI invocation
   - Search logs for events like `ai_request_started`, `ai_request_completed`, `rag_summary`, `pattern_signals`
 
+### Real log examples (from pods)
+- Tail logs (JSON, no PII):
+  ```bash
+  kubectl -n fraudguard logs deploy/risk-scorer --since=15m | jq -c .
+  ```
+- Sample entries (call lifecycle and results):
+  ```json
+  {"event":"starting_risk_scorer","port":8080,"gemini_model":"gemini-2.5-flash"}
+  {"event":"ai_invoke","transaction_id":"local-test-1","use_vertex":true,"use_sdk":false,"project":"<PROJECT>","location":"us-central1","model":"gemini-2.5-flash","rag_history_count":50,"signals_included":true}
+  {"event":"vertex_ai_call_success","parsed":true,"sdk":false,"api_version":"v1"}
+  {"event":"ai_result_received","transaction_id":"local-test-1","source":"vertex","risk_score":0.8,"rationale_preview":"New recipient and amount $1100.00 exceeds $999.00;..."}
+  {"event":"risk_analysis_completed","transaction_id":"local-test-1","risk_score":0.8}
+  ```
+- Tip: grep event names: ai_invoke, vertex_ai_call_success, ai_result_received, risk_analysis_completed.
+
 ## 6. Optional components (used: what/why/how)
 ### MCP Gateway (used)
   - Purpose: central API for ingesting and serving transactions, and handing off to the risk pipeline.
@@ -90,52 +105,86 @@
   - How: ClusterIP Services with NetworkPolicies; no public exposure.
   - On/Off: controlled via K8s Services/Deployments and NetworkPolicies. Tightening/denying specific policies will block the corresponding flows; keep defaults for normal operation.
 
-## 7. Helm charts (app)
+## 7. RAG implementation
+- Source: mcp-gateway provides recent account history to risk-scorer (GET /accounts/{id}/transactions), bounded by RAG_HISTORY_LIMIT (default 50)
+- Summarization (summarize_history_for_rag):
+  - known_recipients: [{ recipient, count, typical_amount }]
+  - typical_amount (overall account), history_count
+  - common_hours (top hours of day), weekday/weekend counts
+  - velocity summary: count_last_15m, count_last_60m
+  - recipient_first_seen map to compute age in days
+- Pattern signals (analyze_pattern_signals):
+  - known_recipient/new_recipient, recipient_tx_count, recipient_first_seen_days
+  - account_tx_count_30d, amount_deviation_from_known (ratio), off_hours flag
+  - velocity_15m/velocity_60m and velocity_flag
+- Prompt construction (build_vertex_prompt): injects HISTORICAL ANALYSIS using recipient- or account-typical amounts and the RAG summary + signals (no PII)
+- Business rules (fast-path and normal path):
+  - New recipient and amount > NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD (default 999) -> escalate to at least NEW_RECIPIENT_MIN_SCORE (0.8)
+  - Amount >= DEVIATION_HIGH_MULTIPLIER × typical (recipient first, else account) -> escalate to at least DEVIATION_MIN_SCORE (0.8)
+- Vector neighbors (optional): when USE_VERTEX_MATCHING/ENABLE_VECTOR_UPSERTS, the service embeds transactions (allowed fields only) and upserts to Vertex Matching Engine; neighbor context is appended to the prompt if available.
+- Privacy: Only allowed BoA fields and derived signals are used; logs stay JSON and exclude PII.
+
+## 8. Helm charts (app)
 - Location: `helm/workload`
 - Values to change: hostnames, image tags, resources, history window (`RAG_HISTORY_LIMIT`)
 - Override safely: `--set` for one-offs; or copy values/<service>.yaml and keep under version control
 - Installs: Deployments, Services, optional Ingress/ManagedCert (via k8s manifests), NetworkPolicy; HPA optional
+## 9. Database
+- mcp-gateway (demo-grade storage)
+  - Engine: SQLite
+  - Path (env): DATABASE_PATH (default /var/run/transactions.db)
+  - Purpose: store ingested transactions and AI outputs (risk_score, risk_level, risk_explanation) for the dashboard and APIs
+  - Notes: ephemeral container storage (emptyDir); suitable for demos. For production, use Cloud SQL (Postgres/MySQL) or a managed DB; add migrations and backups.
+- explain-agent (audit trail)
+  - Engine: SQLite
+  - URL (env): DATABASE_URL (default sqlite:///var/run/audit.db)
+  - Table: audit_records { id, transaction_id UNIQUE, risk_score, rationale, explanation, action, timestamp }
+  - Purpose: persist rationale and recommended action for audit; optionally forward to action-orchestrator
+- Data hygiene
+  - No PII in stored text; only BoA-provided transaction fields and derived signals
+  - Retention: demo-only; for longer retention move to durable storage (e.g., Cloud SQL / BigQuery) and add TTLs/archival
 
-## 8. Terraform (infra)
+
+## 10. Terraform (infra)
 - Repo: https://github.com/mohankrishnaalavala/infra-gcp-gke
 - Resources: GKE Autopilot, Artifact Registry, DNS, static IP, ManagedCertificate, Workload Identity bindings
 - Minimal apply sequence: init → plan → apply; then apply the app repo k8s manifests and Helm charts
 
-## 9. Security
+## 11. Security
 - Containers: runAsNonRoot, readOnlyRootFilesystem
 - RBAC: least-privileged service accounts; Workload Identity for CI/CD
 - NetworkPolicy: restrict east-west; allow only necessary service communications
 - Secrets: Secret Manager CSI or K8s Secret; no secrets in code
 - Privacy: logs exclude PII; prompts limited to non-PII features
 
-## 10. Networking
+## 12. Networking
 - Services: ClusterIP for internal services, Ingress for public endpoints
 - Public hosts: dashboard + BoA on HTTPS (Managed Certificates)
 - Probes: liveness/readiness; HPA optional
 
-## 11. DNS & TLS
+## 13. DNS & TLS
 - Reserve static IP for Ingress
 - Create A records for dashboard + BoA
 - Apply ManagedCertificate manifests; wait for `Active`
 - Verify HTTPS end-to-end by loading domains in a browser and checking cert
 
-## 12. Observability & operations
+## 14. Observability & operations
 - Health endpoints: every service exposes `GET /healthz` (200 JSON)
 - Logs: JSON structured; search keys like `event`, `severity`, `transaction_id`
 - Common tail: `kubectl logs -n fraudguard deploy/<svc> -f | jq .`
 - “Good looks like”: Dashboard shows recent BoA transfers; High/Medium/Low buckets update within seconds
 
-## 13. Error handling & failures
+## 15. Error handling & failures
 - Common failures: BoA auth issues, AI timeouts, history fetch errors
 - Fallbacks: deterministic rules (e.g., new recipient + amount threshold; >= N× typical) even when AI path is slow
 - Logs to search: `boa_history_error`, `amount_vs_typical_*`, `rule_escalation_applied`, `ai_request_*`
 
-## 14. Performance & scaling
+## 16. Performance & scaling
 - Defaults: conservative resource requests; scale with HPA as needed
 - `RAG_HISTORY_LIMIT=50` balances latency and context
 - Vector upserts are async fire-and-forget to avoid blocking main path
 
-## 15. Configuration reference (examples)
+## 17. Configuration reference (examples)
 - Global/AI:
   - `USE_VERTEX_AI` (bool), `GEMINI_MODEL`, `GEMINI_PROJECT_ID`, `GEMINI_LOCATION`, `FORCE_GL_OAUTH`
 - Risk rules:
@@ -144,7 +193,7 @@
 - RAG/Vector:
   - `RAG_HISTORY_LIMIT` (default 50), `USE_VERTEX_MATCHING`, `ENABLE_VECTOR_UPSERTS`, `VERTEX_EMBED_MODEL`, `VERTEX_ME_INDEX*`
 
-## 16. API entry points (brief)
+## 18. API entry points (brief)
 - mcp-gateway:
   - POST `/api/transactions` (ingest)
   - GET `/accounts/{id}/transactions?limit=…` (history)
@@ -156,17 +205,17 @@
 - boa-monitor / txn-watcher:
   - GET `/healthz`, GET `/status` (watcher)
 
-## 17. Demo scenarios (for judges)
+## 19. Demo scenarios (for judges)
 - New payee + high amount → expect HOLD/High; rationale mentions new recipient threshold
 - Known recipient + typical amount → expect Low/Medium; rationale shows pattern alignment
 - Reset between runs: redeploy mcp-gateway or clear its demo DB if needed (demo-grade storage)
 
-## 18. Limitations
+## 20. Limitations
 - Demo-grade local storage; single-account emphasis; limited categories
 - AI fallback rules kick in if API keys/ADC missing
 - For full scale: multi-account feature store, durable DB, rate limits, drift checks
 
-## 19. Future enhancements
+## 21. Future enhancements
 - Make Vertex path default; richer features; BigQuery/Feature Store; streaming (Pub/Sub)
 - Alerting/notifications; policy-as-code for actions; audit viewer; expanded A2A/ADK/MCP tooling
 

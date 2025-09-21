@@ -31,7 +31,7 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 ## Components on GKE (brief)
 - **mcp-gateway** — ingest & history APIs for services/UI  
 - **boa-monitor** — authenticates to BoA, fetches history, forwards events  
-- **risk-scorer** — Gemini/Vertex AI analysis with RAG over recent **N** (default 50)  
+- **risk-scorer** — Gemini/Vertex AI analysis with RAG over recent **N** (default 50). Default model via Helm: gemini-2.5-flash
 - **explain-agent** — rationale/audit store  
 - **action-orchestrator** — can hold/flag via BoA API  
 - **dashboard** — Flask UI; tri-level risk (read-only)
