@@ -1367,6 +1367,7 @@ async def analyze_transaction(transaction: Transaction):
                 import statistics as _stats
                 rk = str((tx_payload.get("label") or "")).lower()
                 cur_id = str(tx_payload.get("transaction_id", ""))
+                amount_val = amt_for_rule
                 _rec_amounts = [float(h.get("amount") or 0) for h in history
                                 if str((h.get("label") or h.get("merchant") or "")).lower() == rk
                                 and str(h.get("transaction_id", "")) != cur_id
@@ -1435,6 +1436,7 @@ async def analyze_transaction(transaction: Transaction):
                 import statistics as _stats
                 rk = str((tx_payload.get("label") or "")).lower()
                 cur_id = str(tx_payload.get("transaction_id", ""))
+                amount_val = amt_for_rule
                 _rec_amounts = [float(h.get("amount") or 0) for h in history
                                 if str((h.get("label") or h.get("merchant") or "")).lower() == rk
                                 and str(h.get("transaction_id", "")) != cur_id
