@@ -21,7 +21,7 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 - Reads BoA transactions via **JWT + APIs**, normalizes, and posts to the pipeline.  
 - Scores risk with **Gemini/Vertex AI** using recent history for velocity, deviation, and recipient patterns.  
 - Explains each decision and displays **High / Medium / Low** on a **read-only** dashboard.  
-- Optional **action-orchestrator** can hold/flag via BoA API.
+- **action-orchestrator** can hold/flag via BoA API.
 
 **Core components:** `boa-monitor → mcp-gateway → risk-scorer → explain-agent → dashboard` (+ optional `action-orchestrator`).  
 **Security/ops:** Workload Identity, Secret Manager CSI, NetworkPolicy, non-root containers, Managed Certs, Cloud Logging/Monitoring.
@@ -33,7 +33,7 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 - **boa-monitor** — authenticates to BoA, fetches history, forwards events  
 - **risk-scorer** — Gemini/Vertex AI analysis with RAG over recent **N** (default 50)  
 - **explain-agent** — rationale/audit store  
-- **action-orchestrator (optional)** — can hold/flag via BoA API  
+- **action-orchestrator** — can hold/flag via BoA API  
 - **dashboard** — Flask UI; tri-level risk (read-only)
 
 ## AI models used (brief)
@@ -86,7 +86,7 @@ Expected
 
 ---
 
-## Screens (replace with captures)
+## Screenshots
 - BoA transfer
 ![BoA transfer](images/boatransaction.png)
 - FraudGuard login & dashboard 
