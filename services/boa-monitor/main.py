@@ -47,6 +47,7 @@ app = FastAPI(
 # Configuration
 MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "http://mcp-gateway.fraudguard.svc.cluster.local:8080")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))  # seconds
+MAX_TXNS_PER_CYCLE = int(os.getenv("MAX_TXNS_PER_CYCLE", "50"))
 
 # Bank of Anthos service endpoints
 BOA_USERSERVICE_URL = os.getenv("BOA_USERSERVICE_URL", "http://userservice.boa.svc.cluster.local:8080")
@@ -54,6 +55,13 @@ BOA_HISTORY_URL = os.getenv("BOA_HISTORY_URL", "http://transactionhistory.boa.sv
 
 # Bank of Anthos credentials (inject via K8s Secret; do not hardcode secrets)
 BOA_USERNAME = os.getenv("BOA_USERNAME", "")
+# Vertex Indexer configuration (optional)
+USE_VERTEX_INDEXER = os.getenv("USE_VERTEX_INDEXER", "false").lower() == "true"
+GEMINI_PROJECT_ID = os.getenv("GEMINI_PROJECT_ID", "fraudguard-hackathon")
+GEMINI_LOCATION = os.getenv("GEMINI_LOCATION", "us-central1")
+VERTEX_EMBED_MODEL = os.getenv("VERTEX_EMBED_MODEL", "text-embedding-004")
+VERTEX_ME_INDEX_RESOURCE = os.getenv("VERTEX_ME_INDEX_RESOURCE", "")  # projects/.../locations/.../indexes/...
+
 BOA_PASSWORD = os.getenv("BOA_PASSWORD", "")
 
 # In-memory tracking of processed transactions
@@ -181,67 +189,170 @@ async def get_boa_transactions() -> List[Dict]:
         logger.error("failed_to_fetch_boa_transactions", error=str(e))
         return []
 
+# === Vertex Indexer helpers ===
+async def _embed_text(text: str) -> Optional[list[float]]:
+    """Get embedding vector using Vertex Text Embeddings; never raise."""
+    if not USE_VERTEX_INDEXER:
+        return None
+    try:
+        import anyio
+        def _sync_embed() -> Optional[list[float]]:
+            from vertexai import init
+            try:
+                from vertexai.language_models import TextEmbeddingModel
+            except Exception:
+                from vertexai.preview.language_models import TextEmbeddingModel  # type: ignore
+            init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            model = TextEmbeddingModel.from_pretrained(VERTEX_EMBED_MODEL)
+            res = model.get_embeddings([text])
+            vec = res[0].values if res else []
+            return list(vec) if vec else None
+        return await anyio.to_thread.run_sync(_sync_embed)
+    except Exception as e:
+        logger.info("embed_failed", error=str(e))
+        return None
+
+
+def _build_embedding_text_from_boa_tx(tx: Dict) -> str:
+    acct = str(tx.get("accountId", ""))
+    label = "unknown"
+    try:
+        date_only = str(tx.get("timestamp", "")).split("T")[0]
+    except Exception:
+        date_only = ""
+    tx_type = str(tx.get("type", "unknown"))
+    try:
+        amt = abs(float(tx.get("amount", 0) or 0))
+    except Exception:
+        amt = 0.0
+    return f"account:{acct} label:{label} date:{date_only} type:{tx_type} amount:{amt:.2f}"
+
+
+async def _upsert_to_index(tx: Dict, vector: list[float]) -> bool:
+    if not (USE_VERTEX_INDEXER and VERTEX_ME_INDEX_RESOURCE and vector):
+        return False
+    try:
+        import anyio
+        def _sync_upsert() -> bool:
+            from google.cloud import aiplatform_v1 as gapic
+            from google.cloud.aiplatform_v1.types import index as index_types
+            client = gapic.IndexServiceClient(client_options={"api_endpoint": f"{GEMINI_LOCATION}-aiplatform.googleapis.com"})
+            dp = index_types.IndexDatapoint(
+                datapoint_id=str(tx.get("transactionId") or tx.get("transaction_id") or ""),
+                feature_vector=vector,
+            )
+            req = gapic.UpsertDatapointsRequest(index=VERTEX_ME_INDEX_RESOURCE, datapoints=[dp])
+            client.upsert_datapoints(request=req)
+            return True
+        ok = await anyio.to_thread.run_sync(_sync_upsert)
+        if ok:
+            logger.info("vector_upsert_success", transaction_id=str(tx.get("transactionId")))
+        return ok
+    except Exception as e:
+        logger.info("vector_upsert_failed", error=str(e))
+        return False
+
+async def _index_tx_async(tx: Dict) -> None:
+    try:
+        text = _build_embedding_text_from_boa_tx(tx)
+        vec = await _embed_text(text)
+        if vec:
+            await _upsert_to_index(tx, vec)
+    except Exception as ix:
+        logger.info("indexer_skip_error", error=str(ix))
+
 async def forward_to_fraudguard(transaction: Dict) -> bool:
-    """Forward transaction to FraudGuard for AI analysis"""
+    """Forward transaction to FraudGuard for AI analysis and upsert to Vertex index (optional)."""
     transaction_id = transaction.get("transactionId", f"boa_{int(time.time())}")
 
     try:
-        # Convert BoA transaction format to FraudGuard format
-        # Prefer recipient account encoded as merchant to enable pattern analysis
         merchant_value = (
             f"acct:{transaction.get('recipientAccountId')}"
-            if transaction.get('recipientAccountId') else transaction.get("description", "Unknown Merchant")
+            if transaction.get('recipientAccountId') else transaction.get("description", "BoA")
         )
-        # Infer transaction type when not provided by BoA history
         inferred_type = transaction.get("type")
         if not inferred_type:
             acct = transaction.get("accountId")
             recip = transaction.get("recipientAccountId")
-            # If money is going to a different recipient, it's a debit; otherwise treat as credit
             inferred_type = "debit" if recip and recip != acct else "credit"
 
         fraudguard_transaction = {
             "transaction_id": transaction_id,
-            "amount": abs(float(transaction.get("amount", 0))),  # Use absolute value
+            "amount": abs(float(transaction.get("amount", 0) or 0)),
             "merchant": merchant_value,
             "user_id": transaction.get("accountId", "unknown_user"),
             "timestamp": transaction.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "type": inferred_type,
-            "source": "bank_of_anthos"
+            "source": "bank_of_anthos",
         }
 
-        logger.info("forwarding_transaction_to_fraudguard",
-                   transaction_id=transaction_id,
-                   amount=fraudguard_transaction["amount"],
-                   merchant=fraudguard_transaction["merchant"],
-                   url=f"{MCP_GATEWAY_URL}/api/transactions")
-
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
+            resp = await client.post(
                 f"{MCP_GATEWAY_URL}/api/transactions",
                 json=fraudguard_transaction,
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
             )
+        ok = resp.status_code in (200, 201, 202)
+        logger.info("mcp_forward_result", transaction_id=transaction_id, status_code=resp.status_code, ok=ok)
 
-            logger.info("mcp_gateway_response",
-                       transaction_id=transaction_id,
-                       status_code=response.status_code,
-                       response_headers=dict(response.headers))
+        if ok and USE_VERTEX_INDEXER:
+            try:
+                asyncio.create_task(_index_tx_async(transaction))
+            except Exception as ix:
+                logger.info("indexer_skip_error", error=str(ix))
 
-            if response.status_code in [200, 201, 202]:
-                logger.info("transaction_forwarded_to_fraudguard",
-                           transaction_id=transaction_id,
-                           amount=fraudguard_transaction["amount"],
-                           merchant=fraudguard_transaction["merchant"],
-                           response_text=response.text)
-                return True
-            else:
-                logger.warning("failed_to_forward_transaction",
-                              transaction_id=transaction_id,
-                              status_code=response.status_code,
-                              response=response.text,
-                              url=f"{MCP_GATEWAY_URL}/api/transactions")
-                return False
+        return ok
+
+    except httpx.TimeoutException as e:
+        logger.error("mcp_gateway_timeout", transaction_id=transaction_id, url=f"{MCP_GATEWAY_URL}/api/transactions", timeout=15.0, error=str(e))
+        return False
+    except httpx.HTTPStatusError as e:
+        logger.error("mcp_gateway_http_error", transaction_id=transaction_id, status_code=e.response.status_code, response_text=e.response.text, url=f"{MCP_GATEWAY_URL}/api/transactions", error=str(e))
+        return False
+    except Exception as e:
+        logger.error("error_forwarding_transaction", transaction_id=transaction_id, error_type=type(e).__name__, error=str(e), url=f"{MCP_GATEWAY_URL}/api/transactions")
+        return False
+def _build_embedding_text_from_boa_tx(tx: Dict) -> str:
+    # Allowed fields only: account_id(label optional), date, type, amount
+    acct = str(tx.get("accountId", ""))
+    # label may be unavailable; use "unknown"
+    label = "unknown"
+    try:
+        date_only = str(tx.get("timestamp", "")).split("T")[0]
+    except Exception:
+        date_only = ""
+    tx_type = str(tx.get("type", "unknown"))
+    try:
+        amt = abs(float(tx.get("amount", 0) or 0))
+    except Exception:
+        amt = 0.0
+    return f"account:{acct} label:{label} date:{date_only} type:{tx_type} amount:{amt:.2f}"
+
+
+async def _upsert_to_index(tx: Dict, vector: list[float]) -> bool:
+    if not (USE_VERTEX_INDEXER and VERTEX_ME_INDEX_RESOURCE and vector):
+        return False
+    try:
+        import anyio
+        def _sync_upsert() -> bool:
+            from google.cloud import aiplatform_v1 as gapic
+            from google.cloud.aiplatform_v1.types import index as index_types
+            client = gapic.IndexServiceClient(client_options={"api_endpoint": f"{GEMINI_LOCATION}-aiplatform.googleapis.com"})
+            dp = index_types.IndexDatapoint(
+                datapoint_id=str(tx.get("transactionId") or tx.get("transaction_id") or ""),
+                feature_vector=vector,
+            )
+            req = gapic.UpsertDatapointsRequest(index=VERTEX_ME_INDEX_RESOURCE, datapoints=[dp])
+            client.upsert_datapoints(request=req)
+            return True
+        ok = await anyio.to_thread.run_sync(_sync_upsert)
+        if ok:
+            logger.info("vector_upsert_success", transaction_id=str(tx.get("transactionId")))
+        return ok
+    except Exception as e:
+        logger.info("vector_upsert_failed", error=str(e))
+        return False
+
 
     except httpx.TimeoutException as e:
         logger.error("mcp_gateway_timeout",
@@ -277,43 +388,45 @@ async def monitor_boa_transactions():
         try:
             # Fetch recent transactions from BoA
             transactions = await get_boa_transactions()
-            
+
             new_transactions = 0
             forwarded_transactions = 0
-            
-            for transaction in transactions:
+
+            # Limit work per cycle to avoid long blocking cycles
+            tx_iter = transactions[:MAX_TXNS_PER_CYCLE] if isinstance(transactions, list) else transactions
+            for transaction in tx_iter:
                 transaction_id = transaction.get("transactionId")
-                
+
                 # Skip if we've already processed this transaction
                 if transaction_id in processed_transactions:
                     continue
-                
+
                 new_transactions += 1
-                
+
                 # Forward to FraudGuard
                 if await forward_to_fraudguard(transaction):
                     forwarded_transactions += 1
                     processed_transactions.add(transaction_id)
-                
+
                 # Limit memory usage - keep only recent transaction IDs
                 if len(processed_transactions) > 1000:
                     # Remove oldest 200 entries
                     old_transactions = list(processed_transactions)[:200]
                     for old_txn in old_transactions:
                         processed_transactions.discard(old_txn)
-            
+
             if new_transactions > 0:
                 logger.info("monitoring_cycle_completed",
                            new_transactions=new_transactions,
                            forwarded_transactions=forwarded_transactions,
                            total_processed=len(processed_transactions))
-            
+
             # Update health check timestamp
             health_check.last_poll = datetime.now(timezone.utc).isoformat()
-            
+
         except Exception as e:
             logger.error("monitoring_cycle_failed", error=str(e))
-        
+
         # Wait before next poll
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -321,7 +434,7 @@ async def monitor_boa_transactions():
 async def startup_event():
     """Start the monitoring task when the app starts"""
     logger.info("boa_monitor_starting")
-    
+
     # Start monitoring in background
     asyncio.create_task(monitor_boa_transactions())
 

@@ -25,7 +25,7 @@ help:
 # Configuration
 NAMESPACE ?= fraudguard
 HELM_CHART = ./helm/workload
-SERVICES = mcp-gateway txn-watcher risk-scorer explain-agent action-orchestrator dashboard
+SERVICES = mcp-gateway risk-scorer explain-agent action-orchestrator dashboard boa-monitor
 
 # Run demo script
 demo:
@@ -72,7 +72,7 @@ clean:
 # Lint Python code
 lint:
 	@echo "🔍 Running linting..."
-	@for service in mcp-gateway txn-watcher risk-scorer explain-agent action-orchestrator; do \
+	@for service in mcp-gateway risk-scorer explain-agent action-orchestrator boa-monitor; do \
 		echo "Linting services/$$service..."; \
 		cd services/$$service && python -m ruff check . && python -m black --check .; \
 		cd ../..; \
@@ -84,7 +84,7 @@ lint:
 # Run tests
 test:
 	@echo "🧪 Running tests..."
-	@for service in mcp-gateway txn-watcher risk-scorer explain-agent action-orchestrator; do \
+	@for service in mcp-gateway risk-scorer explain-agent action-orchestrator boa-monitor; do \
 		if [ -f "services/$$service/test_main.py" ]; then \
 			echo "Testing services/$$service..."; \
 			cd services/$$service && python -m pytest test_main.py -v; \

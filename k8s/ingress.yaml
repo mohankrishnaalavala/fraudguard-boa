@@ -27,6 +27,14 @@ spec:
             name: mcp-gateway
             port:
               number: 8080
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-gateway
+            port:
+              number: 8080
+
       - path: /api/risk
         pathType: Prefix
         backend:
@@ -65,6 +73,7 @@ metadata:
   namespace: fraudguard
   annotations:
     cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "fg-backendconfig"}'
 spec:
   type: ClusterIP
   ports:
@@ -82,6 +91,7 @@ metadata:
   namespace: fraudguard
   annotations:
     cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "fg-backendconfig"}'
 spec:
   type: ClusterIP
   ports:

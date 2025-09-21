@@ -3,7 +3,7 @@ namespace: fraudguard
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/boa-monitor
-  tag: latest
+  tag: fixissue-b53f2d0
   pullPolicy: Always
 
 replicaCount: 1
@@ -27,13 +27,26 @@ container:
     - name: MCP_GATEWAY_URL
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: POLL_INTERVAL
-      value: "10"
+      value: "5"
     - name: LOG_LEVEL
       value: "INFO"
     - name: BOA_USERSERVICE_URL
       value: "http://userservice.boa.svc.cluster.local:8080"
     - name: BOA_HISTORY_URL
       value: "http://transactionhistory.boa.svc.cluster.local:8080"
+    - name: USE_VERTEX_INDEXER
+      value: "true"
+    - name: GEMINI_PROJECT_ID
+      value: "fraudguard-hackathon"
+    - name: GEMINI_LOCATION
+      value: "us-central1"
+    - name: VERTEX_EMBED_MODEL
+      value: "text-embedding-004"
+    - name: VERTEX_ME_INDEX_RESOURCE
+      value: "projects/237184630181/locations/us-central1/indexes/3844510576239706112"  # projects/PROJECT/locations/REGION/indexes/INDEX_ID
+    - name: MAX_TXNS_PER_CYCLE
+      value: "50"
+
   envFrom:
     - name: boa-api-credentials  # Provides BOA_USERNAME and BOA_PASSWORD from a K8s Secret
 
@@ -70,8 +83,8 @@ tolerations: []
 
 affinity: {}
 
-autoscaling:
-  enabled: false
+hpa:
+  enabled: true
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
