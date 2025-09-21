@@ -1,117 +1,72 @@
-# FraudGuard on GKE — Hackathon Submission
+# FraudGuard on GKE — Bank of Anthos (API-only extension)
+
+**One-liner:** Agentic fraud risk analysis for **Bank of Anthos** on **GKE Autopilot** using **Gemini / Vertex AI** — **no BoA core changes**.  
+**Same cluster:** namespaces **`boa`** (BoA) and **`fraudguard`** (FraudGuard).
 
 ## Problem
-Real-time fraud detection on consumer banking requires analyzing transaction patterns (frequency, timing, velocity), typical amounts, and recipient anomalies without disrupting users or modifying core banking services.
+Real-time fraud detection needs velocity/deviation/recipient analysis without disrupting users or modifying core banking services.
 
 ## Solution
-FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA transactions via APIs, applies Vertex AI/Gemini RAG-driven analysis, and surfaces a tri-level risk dashboard (High/Medium/Low). No changes to BoA core; we integrate via services and APIs.
+FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex AI** (with a small RAG window over recent history), and surfaces a **read-only** risk dashboard (High / Medium / Low). **No changes to BoA core; API-only integration.**
 
-- Built on Bank of Anthos: https://github.com/GoogleCloudPlatform/bank-of-anthos
-- Deployed on GKE Autopilot with Google Managed Certs and Ingress
-- Live Demo:
-  - Dashboard: https://fraudguard.mohankrishna.site/ (username/pasword: admin/admin)
-  - Bank of Anthos: https://boa.mohankrishna.site/
+**Links**
+- 🎥 **Submission video (≤ 3 min):** _ADD PUBLIC LINK HERE_
+- 🌐 **Dashboard:** https://fraudguard.mohankrishna.site/  *(user/pass: `admin` / `admin`)*
+- 🏦 **BoA (demo):** https://boa.mohankrishna.site/
+- 📘 **Technical details:** [TECHNICAL.md](./TECHNICAL.md)
 
-## Components on GKE
-- mcp-gateway: Ingests/stores transactions, exposes APIs to UI and services
-- boa-monitor: Authenticates to BoA, fetches history, forwards to mcp-gateway
-- risk-scorer: Gemini-powered analysis + RAG over history (50 recent records)
-- explain-agent + action-orchestrator: Explainability and mitigations
+---
 
-- dashboard: Flask UI, tri-level risk (no "Normal")
+## What it does (30-sec read)
+- Reads BoA transactions via **JWT + APIs**, normalizes, and posts to the pipeline.  
+- Scores risk with **Gemini/Vertex AI** using recent history for velocity, deviation, and recipient patterns.  
+- Explains each decision and displays **High / Medium / Low** on a **read-only** dashboard.  
+- Optional **action-orchestrator** can hold/flag via BoA API.
 
-## AI model(s) used
-- Gemini 2.5 Flash via Generative Language API and/or Vertex AI SDK (configurable)
-- RAG over recent 50 transactions, with pattern/velocity/recipient analysis
+**Core components:** `boa-monitor → mcp-gateway → risk-scorer → explain-agent → dashboard` (+ optional `action-orchestrator`).  
+**Security/ops:** Workload Identity, Secret Manager CSI, NetworkPolicy, non-root containers, Managed Certs, Cloud Logging/Monitoring.
 
-### Key config knobs
-- RAG_HISTORY_LIMIT: history window used by risk-scorer for RAG (default 50)
-- USE_VERTEX_MATCHING: enable neighbor retrieval via Vertex Vector Search
-- ENABLE_VECTOR_UPSERTS: auto-upsert analyzed transactions to the index (requires VERTEX_ME_INDEX)
-- VERTEX_EMBED_MODEL / VERTEX_ME_INDEX_ENDPOINT / VERTEX_ME_INDEX_DEPLOYED_ID / VERTEX_ME_INDEX
+---
 
-- DEVIATION_HIGH_MULTIPLIER / DEVIATION_MIN_SCORE: escalate to HIGH when amount >= N× typical (default N=9, min score 0.8)
+## Components on GKE (brief)
+- **mcp-gateway** — ingest & history APIs for services/UI  
+- **boa-monitor** — authenticates to BoA, fetches history, forwards events  
+- **risk-scorer** — Gemini/Vertex AI analysis with RAG over recent **N** (default 50)  
+- **explain-agent** — rationale/audit store  
+- **action-orchestrator (optional)** — can hold/flag via BoA API  
+- **dashboard** — Flask UI; tri-level risk (read-only)
 
+## AI models used (brief)
+- **Gemini 2.5 Flash** (Generative Language API) and/or **Vertex AI** (configurable)  
+- RAG over the **last 50** transactions by default (pattern/velocity/recipient signals)
 
-## ADK/MCP/A2A usage
-- MCP Gateway stores and serves transactions, supports service-to-service calls
-- A2A style internal calls with NetworkPolicies and least-privileged SAs
-- No BoA schema changes; only API reads and derived insights
+## Optional components (used)
+- **MCP-style gateway** for discoverable service tools/endpoints  
+- **A2A service-to-service** calls inside the cluster, restricted by **NetworkPolicies**  
+> Details, commands, and toggles are in **TECHNICAL.md**.
 
-## Deploy steps (Helm/Manifests)
-1) kubectl create ns boa; kubectl create ns fraudguard
-2) kubectl apply -f fraudguard-boa/k8s/boa-ingress.yaml
-3) helm upgrade --install <service> fraudguard-boa/helm/workload -n fraudguard -f fraudguard-boa/values/<service>.yaml (repeat for all)
-4) Create K8s Secret boa-api-credentials with BOA_USERNAME/BOA_PASSWORD in fraudguard ns
-5) Configure Managed Certificates and Cloud DNS for fraudguard.mohankrishna.site and boa.mohankrishna.site
+---
 
-## Quickstart (≤5 min)
-- Make a transfer in BoA UI https://boa.mohankrishna.site/login, then open dashboard: https://fraudguard.mohankrishna.site/ (username/pasword: admin/admin)
-- Watch risk buckets update (High/Medium/Low) and logs in risk-scorer/mcp-gateway
+## Quickstart (≤ 5 minutes)
+1. Open **BoA** and make a transfer: https://boa.mohankrishna.site/  
+2. Open **FraudGuard dashboard**: https://fraudguard.mohankrishna.site/ *(admin/admin)*  
+3. See the bucket update (**High / Medium / Low**) and rationale text.  
+4. Need deploy/env/API details? See **[TECHNICAL.md](./TECHNICAL.md)**.
 
-## Test creds
-Use the BoA demo credentials shown on the BoA login page of your deployment (do not hardcode credentials).
+---
 
-## Limitations / Roadmap
-- Demo-grade SQLite storage; replace with Cloud SQL/Spanner for prod
-- Expand model prompts and feature engineering; add BigQuery historical store
-- Vertex AI as default path (config toggle already present)
-
-## Architecture diagram 
+## Architecture
 ![FraudGuard Architecture](images/architecture.png)
----
 
-## Architecture diagram (conceptual)
-
-The latest diagram is maintained at images/architecture.png and a detailed flow is documented in TECHNICAL.md. Updated conceptual flow:
-
-```text
-[ BoA UI/Services ] --(JWT, APIs)--> [ boa-monitor ] --POST--> [ mcp-gateway ]
-                                                |                      |
-                                                |                      v
-                                          [ risk-scorer ] <---- GET /accounts/{id}/transactions
-                                                |
-                                                v
-                                         [ explain-agent ] -> [ action-orchestrator ]
-                                                |
-                                                v
-                                            [ dashboard ] (High/Medium/Low)
-
-[ txn-watcher (demo feeder) ] --POST--> [ mcp-gateway ]  (shares the same risk pipeline)
-
-GKE Autopilot, Ingress + Managed Certs, Workload Identity, NetworkPolicy, Cloud Logging/Monitoring
-(No BoA core changes; API-only integration)
-```
+> BoA (`ns: boa`) and FraudGuard (`ns: fraudguard`) run in the **same GKE Autopilot cluster**. Integration is via BoA APIs only; **no core changes**.
 
 ---
-## 🧱 Infrastructure (infra-gcp-gke)
 
-Infra-as-code lives in a separate repo: https://github.com/mohankrishnaalavala/infra-gcp-gke
+## Screens (replace with captures)
+- BoA transfer — _placeholder_  
+- FraudGuard dashboard (bucketed result) — _placeholder_
 
-High-level spin-up steps (see that repo for full details):
-- Prepare env: `gcloud auth application-default login` and set project
-- Terraform init/plan/apply under `infra-gcp-gke/envs/<env>` to create:
-  - GKE Autopilot cluster (Workload Identity enabled)
-  - Artifact Registry (us-docker.pkg.dev/<project>/fraudguard)
-  - Service accounts (builder/deployer) and optional budgets
-- Networking & DNS for HTTPS:
-  - Reserve a global static IP named `fraudguard-ip`
-  - Create A records in Cloud DNS (or your DNS provider) pointing both hosts to the Ingress IP
-    - fraudguard.mohankrishna.site → <INGRESS_IP>
-    - boa.mohankrishna.site → <INGRESS_IP>
-  - Apply k8s manifests for Ingress and ManagedCertificate:
-    - fraudguard namespace: `k8s/ingress.yaml` (host fraudguard.mohankrishna.site)
-    - bank-of-anthos namespace: `k8s/boa-ingress.yaml` (host boa.mohankrishna.site)
-  - Wait for ManagedCertificate status = Active; HTTPS will appear automatically
-
-Notes:
-- All services expose GET /healthz and use JSON logs without PII
-- Security: non-root, readOnlyRootFilesystem, NetPol, Secret Manager CSI
-- Dashboard UI shows tri-level risk only (High/Medium/Low)
+---
 
 ## License
-Apache 2.0 (inherits from BoA and this repo)
-
-## Submission page
-This solution deploys fully on Google Kubernetes Engine (GKE Autopilot) and uses Google AI (Gemini) for fraud analysis. It integrates with the open-source Bank of Anthos application strictly via APIs and services with no changes to BoA core. The architecture includes MCP Gateway, BoA Monitor, Risk Scorer (Gemini), Explain Agent, and a tri-level risk Dashboard on GKE, secured by NetworkPolicies and Managed Certificates. Observability is provided via Cloud Logging/Monitoring. DNS is managed in Cloud DNS.
-
+Apache-2.0
