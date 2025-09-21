@@ -472,7 +472,7 @@ def _render_dashboard(transactions: list) -> str:
             const data = await res.json();
             const f = data.transactions_forwarded ?? data.forwarded ?? 0;
             const n = data.transactions_found ?? data.found ?? 0;
-            alert(`Manual sync: forwarded ${f}/${n} (status ${data.upstream_status ?? res.status})`);
+            alert('Manual sync: forwarded ' + f + '/' + n + ' (status ' + (data.upstream_status ?? res.status) + ')');
             location.reload();
           }} catch (e) {{
             alert('Manual sync failed');
