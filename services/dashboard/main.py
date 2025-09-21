@@ -264,19 +264,20 @@ def _render_dashboard(transactions: list) -> str:
             if cur_dt is not None and ctr and mode_count >= 3 and abs((cur_dt.hour - mode_hour)) >= 3:
                 tod_txt = f"unusual hour (typical ~{mode_hour:02d}:00)"
 
+        # Fallback/append explanation from backend if present (used to suppress confusing ratio text)
+        bex = (tx.get("risk_explanation") or "").strip()
+
         parts = []
         # Start with explicit level
         parts.append(f"{rl.title()} risk")
         parts.append(f"Amount {_fmt_amt(cur_amt)}")
-        if ratio_txt:
+        suppress_ratio = ("New recipient and amount" in bex)
+        if ratio_txt and not suppress_ratio:
             parts.append(ratio_txt)
         if freq_txt:
             parts.append(freq_txt)
         if tod_txt:
             parts.append(tod_txt)
-
-        # Fallback/append explanation from backend if present
-        bex = (tx.get("risk_explanation") or "").strip()
         if bex:
             parts.append(bex)
 

@@ -1363,26 +1363,34 @@ async def analyze_transaction(transaction: Transaction):
             try:
                 ratio = None
                 typical = None
-                src = None
-                amount_val = amt_for_rule
-                # Prefer recipient-specific typical
+                # Compute typical excluding the current transaction from history
+                import statistics as _stats
                 rk = str((tx_payload.get("label") or "")).lower()
-                for rec in (rag_summary.get("known_recipients") or []):
-                    if str(rec.get("recipient", "")).lower() == rk:
-                        t = float(rec.get("typical_amount") or 0)
-                        if t > 0:
-                            typical = t
-                            src = "recipient"
-                        break
+                cur_id = str(tx_payload.get("transaction_id", ""))
+                _rec_amounts = [float(h.get("amount") or 0) for h in history
+                                if str((h.get("label") or h.get("merchant") or "")).lower() == rk
+                                and str(h.get("transaction_id", "")) != cur_id
+                                and float(h.get("amount") or 0) > 0]
+                typical = None
+                src = None
+                if len(_rec_amounts) >= 1:
+                    try:
+                        typical = float(_stats.median(_rec_amounts))
+                    except Exception:
+                        typical = sum(_rec_amounts) / len(_rec_amounts)
+                    src = "recipient"
                 if typical is None:
-                    t_overall = float(rag_summary.get("typical_amount") or 0)
-                    if t_overall > 0:
-                        typical = t_overall
+                    _all_amounts = [float(h.get("amount") or 0) for h in history
+                                    if str(h.get("transaction_id", "")) != cur_id and float(h.get("amount") or 0) > 0]
+                    if len(_all_amounts) >= 1:
+                        try:
+                            typical = float(_stats.median(_all_amounts))
+                        except Exception:
+                            typical = sum(_all_amounts) / len(_all_amounts)
                         src = "account"
                 if typical and typical > 0:
                     ratio = amount_val / typical
-                hc = int(rag_summary.get("history_count", 0) or 0)
-                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER and hc > 0:
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER:
                     base_score, _ = heuristic_risk_from_tx(tx_payload)
                     score_val = max(float(base_score), DEVIATION_MIN_SCORE)
                     add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
@@ -1423,26 +1431,34 @@ async def analyze_transaction(transaction: Transaction):
             try:
                 ratio = None
                 typical = None
-                src = None
-                amount_val = amt_for_rule
-                # Prefer recipient-specific typical
+                # Compute typical excluding the current transaction from history
+                import statistics as _stats
                 rk = str((tx_payload.get("label") or "")).lower()
-                for rec in (rag_summary.get("known_recipients") or []):
-                    if str(rec.get("recipient", "")).lower() == rk:
-                        t = float(rec.get("typical_amount") or 0)
-                        if t > 0:
-                            typical = t
-                            src = "recipient"
-                        break
+                cur_id = str(tx_payload.get("transaction_id", ""))
+                _rec_amounts = [float(h.get("amount") or 0) for h in history
+                                if str((h.get("label") or h.get("merchant") or "")).lower() == rk
+                                and str(h.get("transaction_id", "")) != cur_id
+                                and float(h.get("amount") or 0) > 0]
+                typical = None
+                src = None
+                if len(_rec_amounts) >= 1:
+                    try:
+                        typical = float(_stats.median(_rec_amounts))
+                    except Exception:
+                        typical = sum(_rec_amounts) / len(_rec_amounts)
+                    src = "recipient"
                 if typical is None:
-                    t_overall = float(rag_summary.get("typical_amount") or 0)
-                    if t_overall > 0:
-                        typical = t_overall
+                    _all_amounts = [float(h.get("amount") or 0) for h in history
+                                    if str(h.get("transaction_id", "")) != cur_id and float(h.get("amount") or 0) > 0]
+                    if len(_all_amounts) >= 1:
+                        try:
+                            typical = float(_stats.median(_all_amounts))
+                        except Exception:
+                            typical = sum(_all_amounts) / len(_all_amounts)
                         src = "account"
                 if typical and typical > 0:
                     ratio = amount_val / typical
-                hc = int(rag_summary.get("history_count", 0) or 0)
-                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER and hc > 0:
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER:
                     base_score, _ = heuristic_risk_from_tx(tx_payload)
                     score_val = max(float(base_score), DEVIATION_MIN_SCORE)
                     add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
@@ -1683,23 +1699,34 @@ async def analyze_transaction(transaction: Transaction):
                 typical = None
                 src = None
                 amount_val = amt_for_rule
+                # Compute typical excluding the current transaction from history
+                import statistics as _stats
                 rk = str((tx_payload.get("label") or "")).lower()
-                for rec in (rag_summary.get("known_recipients") or []):
-                    if str(rec.get("recipient", "")).lower() == rk:
-                        t = float(rec.get("typical_amount") or 0)
-                        if t > 0:
-                            typical = t
-                            src = "recipient"
-                        break
+                cur_id = str(tx_payload.get("transaction_id", ""))
+                _rec_amounts = [float(h.get("amount") or 0) for h in history
+                                if str((h.get("label") or h.get("merchant") or "")).lower() == rk
+                                and str(h.get("transaction_id", "")) != cur_id
+                                and float(h.get("amount") or 0) > 0]
+                typical = None
+                src = None
+                if len(_rec_amounts) >= 1:
+                    try:
+                        typical = float(_stats.median(_rec_amounts))
+                    except Exception:
+                        typical = sum(_rec_amounts) / len(_rec_amounts)
+                    src = "recipient"
                 if typical is None:
-                    t_overall = float(rag_summary.get("typical_amount") or 0)
-                    if t_overall > 0:
-                        typical = t_overall
+                    _all_amounts = [float(h.get("amount") or 0) for h in history
+                                    if str(h.get("transaction_id", "")) != cur_id and float(h.get("amount") or 0) > 0]
+                    if len(_all_amounts) >= 1:
+                        try:
+                            typical = float(_stats.median(_all_amounts))
+                        except Exception:
+                            typical = sum(_all_amounts) / len(_all_amounts)
                         src = "account"
-                hc = int(rag_summary.get("history_count", 0) or 0)
                 if typical and typical > 0:
                     ratio = amount_val / typical
-                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER and hc > 0:
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER:
                     prev_score = float(score_val)
                     score_val = max(prev_score, DEVIATION_MIN_SCORE)
                     add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
