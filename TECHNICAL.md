@@ -78,13 +78,17 @@
 - Verifying AI invocation
   - Search logs for events like `ai_request_started`, `ai_request_completed`, `rag_summary`, `pattern_signals`
 
-6) Optional components (what/why/how)
-- ADK: optional; agent structure/tooling for explainability/workflows (planned)
-- MCP: mcp-gateway exposes API endpoints used by services and UI; can front A2A patterns
-- A2A: internal service-to-service calls; policies in NetworkPolicy
-- kubectl-ai: optional to assist ops with safe queries
-- Gemini CLI: optional for prompts/inspection
-- Toggle via env vars and values.yaml; keep defaults off for minimal demo footprint
+6) Optional components (used: what/why/how)
+- MCP Gateway (used)
+  - Purpose: central API for ingesting and serving transactions, and handing off to the risk pipeline.
+  - Entrypoints:
+    - Local: `cd services/mcp-gateway && python main.py`
+    - Helm: `helm upgrade --install mcp-gateway ./helm/workload -n fraudguard -f values/mcp-gateway.yaml --set image.tag=<SHA> --atomic --wait`
+  - On/Off: deploy/undeploy the `mcp-gateway` Helm release. Disabling it stops ingest and end-to-end analysis.
+- A2A service-to-service (used)
+  - Purpose: internal calls among services (boa-monitor → mcp-gateway; mcp-gateway → risk-scorer; risk-scorer → explain-agent/action-orchestrator; mcp-gateway → dashboard).
+  - How: ClusterIP Services with NetworkPolicies; no public exposure.
+  - On/Off: controlled via K8s Services/Deployments and NetworkPolicies. Tightening/denying specific policies will block the corresponding flows; keep defaults for normal operation.
 
 7) Helm charts (app)
 - Location: `helm/workload`
