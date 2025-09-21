@@ -267,5 +267,55 @@ class TestBusinessRuleEscalation:
             assert body["risk_score"] >= 0.8
             assert "New recipient" in body["rationale"]
 
+
+    def test_amount_deviation_escalation_9x(self, monkeypatch):
+        # Ensure deviation rule env
+        monkeypatch.setenv("DEVIATION_HIGH_MULTIPLIER", "9")
+        monkeypatch.setenv("DEVIATION_MIN_SCORE", "0.8")
+        # Keep new recipient rule but make recipient KNOWN via history
+        monkeypatch.setenv("NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD", "999")
+        monkeypatch.setenv("NEW_RECIPIENT_MIN_SCORE", "0.8")
+
+        # Mock AI to return a medium score to observe escalation by rule
+        async def fake_ai(prompt: str):
+            return {"risk_score": 0.6, "rationale": "Medium risk; baseline"}
+
+        # History with same recipient label around $230 typical
+        async def fake_history(account_id: str, limit: int = 100):
+            base = []
+            for i in range(10):
+                base.append({
+                    "transaction_id": f"h{i}",
+                    "account_id": account_id,
+                    "amount": 230.0,
+                    "label": "acct:9876543210",
+                    "merchant": "acct:9876543210",
+                    "category": "transfer",
+                    "type": "debit",
+                    "timestamp": "2024-01-01T12:00:00Z"
+                })
+            return base
+
+        async def fake_send(_: object):
+            return None
+
+        with patch('main.call_gemini_api', new=fake_ai), \
+             patch('main.fetch_account_history', new=fake_history), \
+             patch('main.send_to_explain_agent', new=fake_send):
+            transaction_data = {
+                "transaction_id": "test_rule_dev_001",
+                "account_id": "acc_test",
+                "amount": 15000.0,  # ~65x typical 230
+                "merchant": "acct:9876543210",
+                "label": "acct:9876543210",
+                "category": "transfer",
+                "timestamp": "2024-01-02T12:00:00Z"
+            }
+            response = client.post("/analyze", json=transaction_data)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["risk_score"] >= 0.8
+            assert "x higher than typical" in body["rationale"]
+
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -90,6 +90,10 @@ NEW_RECIPIENT_MIN_SCORE = float(os.getenv("NEW_RECIPIENT_MIN_SCORE", "0.8"))
 # RAG history window
 RAG_HISTORY_LIMIT = int(os.getenv("RAG_HISTORY_LIMIT", "50"))
 
+# Amount deviation rule: escalate when amount >= N x typical (recipient/account)
+DEVIATION_HIGH_MULTIPLIER = float(os.getenv("DEVIATION_HIGH_MULTIPLIER", "9"))
+DEVIATION_MIN_SCORE = float(os.getenv("DEVIATION_MIN_SCORE", "0.8"))
+
 
 # Load API key from file (Secret Manager CSI) if provided
 if GEMINI_API_KEY_FILE:
@@ -1354,6 +1358,128 @@ async def analyze_transaction(transaction: Transaction):
                     risk_score=risk_score.risk_score
                 )
                 return risk_score
+
+            # Fast-path: escalate when amount is >= N x typical (prefer recipient-specific typical)
+            try:
+                ratio = None
+                typical = None
+                src = None
+                amount_val = amt_for_rule
+                # Prefer recipient-specific typical
+                rk = str((tx_payload.get("label") or "")).lower()
+                for rec in (rag_summary.get("known_recipients") or []):
+                    if str(rec.get("recipient", "")).lower() == rk:
+                        t = float(rec.get("typical_amount") or 0)
+                        if t > 0:
+                            typical = t
+                            src = "recipient"
+                        break
+                if typical is None:
+                    t_overall = float(rag_summary.get("typical_amount") or 0)
+                    if t_overall > 0:
+                        typical = t_overall
+                        src = "account"
+                if typical and typical > 0:
+                    ratio = amount_val / typical
+                hc = int(rag_summary.get("history_count", 0) or 0)
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER and hc > 0:
+                    base_score, _ = heuristic_risk_from_tx(tx_payload)
+                    score_val = max(float(base_score), DEVIATION_MIN_SCORE)
+                    add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
+                    rationale_val = add_reason
+                    logger.info(
+                        "rule_escalation_applied",
+                        rule="amount_vs_typical_fastpath",
+                        ratio=round(ratio, 2),
+                        typical=typical,
+                        source=src,
+                        prev_score=base_score,
+                        new_score=score_val,
+                    )
+                    risk_score = RiskScore(
+                        transaction_id=transaction.transaction_id,
+                        risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+                        rationale=rationale_val,
+                        timestamp=datetime.utcnow()
+                    )
+                    # Fire-and-forget vector upsert (only allowed fields)
+                    if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+                        try:
+                            embed_text = _build_embedding_text(tx_payload)
+                            qvec = await _embed_text(embed_text)
+                            if qvec:
+                                asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+                        except Exception as ue:
+                            logger.info("vector_upsert_failed", error=str(ue))
+                    logger.info(
+                        "risk_analysis_completed",
+                        transaction_id=transaction.transaction_id,
+                        risk_score=risk_score.risk_score
+                    )
+                    return risk_score
+            except Exception as e:
+                logger.error("amount_vs_typical_fastpath_failed", error=str(e))
+            # Fast-path: escalate when amount is >= N x typical (prefer recipient-specific typical)
+            try:
+                ratio = None
+                typical = None
+                src = None
+                amount_val = amt_for_rule
+                # Prefer recipient-specific typical
+                rk = str((tx_payload.get("label") or "")).lower()
+                for rec in (rag_summary.get("known_recipients") or []):
+                    if str(rec.get("recipient", "")).lower() == rk:
+                        t = float(rec.get("typical_amount") or 0)
+                        if t > 0:
+                            typical = t
+                            src = "recipient"
+                        break
+                if typical is None:
+                    t_overall = float(rag_summary.get("typical_amount") or 0)
+                    if t_overall > 0:
+                        typical = t_overall
+                        src = "account"
+                if typical and typical > 0:
+                    ratio = amount_val / typical
+                hc = int(rag_summary.get("history_count", 0) or 0)
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER and hc > 0:
+                    base_score, _ = heuristic_risk_from_tx(tx_payload)
+                    score_val = max(float(base_score), DEVIATION_MIN_SCORE)
+                    add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
+                    rationale_val = add_reason
+                    logger.info(
+                        "rule_escalation_applied",
+                        rule="amount_vs_typical_fastpath",
+                        ratio=round(ratio, 2),
+                        typical=typical,
+                        source=src,
+                        prev_score=base_score,
+                        new_score=score_val,
+                    )
+                    risk_score = RiskScore(
+                        transaction_id=transaction.transaction_id,
+                        risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+                        rationale=rationale_val,
+                        timestamp=datetime.utcnow()
+                    )
+                    # Fire-and-forget vector upsert (only allowed fields)
+                    if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+                        try:
+                            embed_text = _build_embedding_text(tx_payload)
+                            qvec = await _embed_text(embed_text)
+                            if qvec:
+                                asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+                        except Exception as ue:
+                            logger.info("vector_upsert_failed", error=str(ue))
+                    logger.info(
+                        "risk_analysis_completed",
+                        transaction_id=transaction.transaction_id,
+                        risk_score=risk_score.risk_score
+                    )
+                    return risk_score
+            except Exception as e:
+                logger.error("amount_vs_typical_fastpath_failed", error=str(e))
+
         except Exception as e:
             logger.error("rule_escalation_failed", error=str(e))
 
@@ -1551,6 +1677,45 @@ async def analyze_transaction(transaction: Transaction):
                     prev_score=prev_score,
                     new_score=score_val,
                 )
+            # Business rule: escalate when amount >= N x typical (recipient or account)
+            try:
+                ratio = None
+                typical = None
+                src = None
+                amount_val = amt_for_rule
+                rk = str((tx_payload.get("label") or "")).lower()
+                for rec in (rag_summary.get("known_recipients") or []):
+                    if str(rec.get("recipient", "")).lower() == rk:
+                        t = float(rec.get("typical_amount") or 0)
+                        if t > 0:
+                            typical = t
+                            src = "recipient"
+                        break
+                if typical is None:
+                    t_overall = float(rag_summary.get("typical_amount") or 0)
+                    if t_overall > 0:
+                        typical = t_overall
+                        src = "account"
+                hc = int(rag_summary.get("history_count", 0) or 0)
+                if typical and typical > 0:
+                    ratio = amount_val / typical
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER and hc > 0:
+                    prev_score = float(score_val)
+                    score_val = max(prev_score, DEVIATION_MIN_SCORE)
+                    add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
+                    rationale_val = (str(rationale_val or "").strip() + " " + add_reason).strip() if rationale_val else add_reason
+                    logger.info(
+                        "rule_escalation_applied",
+                        rule="amount_vs_typical",
+                        ratio=round(ratio, 2),
+                        typical=typical,
+                        source=src,
+                        prev_score=prev_score,
+                        new_score=score_val,
+                    )
+            except Exception as e:
+                logger.error("amount_vs_typical_rule_failed", error=str(e))
+
         except Exception as e:
             logger.error("rule_escalation_failed", error=str(e))
 

@@ -21,6 +21,9 @@ Environment:
 - NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD: dollar amount above which a first-time recipient is escalated (default: 999)
 - NEW_RECIPIENT_MIN_SCORE: minimum risk_score to enforce when rule triggers (default: 0.8)
 
+- DEVIATION_HIGH_MULTIPLIER: multiplier for amount vs. typical to escalate to HIGH (default: 9)
+- DEVIATION_MIN_SCORE: minimum risk_score when deviation rule triggers (default: 0.8)
+
 
 Additional Vertex Vector Search (optional):
 - USE_VERTEX_MATCHING: enable neighbor retrieval for context (default: true via values)

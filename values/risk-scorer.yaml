@@ -59,6 +59,12 @@ container:
       value: "999"
     - name: NEW_RECIPIENT_MIN_SCORE
       value: "0.8"
+    # Amount deviation escalation: amount >= N x typical → HIGH
+    - name: DEVIATION_HIGH_MULTIPLIER
+      value: "9"
+    - name: DEVIATION_MIN_SCORE
+      value: "0.8"
+
 
   envFrom:
     - name: risk-scorer-gemini

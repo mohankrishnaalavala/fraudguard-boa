@@ -27,6 +27,8 @@ FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA tran
 - ENABLE_VECTOR_UPSERTS: auto-upsert analyzed transactions to the index (requires VERTEX_ME_INDEX)
 - VERTEX_EMBED_MODEL / VERTEX_ME_INDEX_ENDPOINT / VERTEX_ME_INDEX_DEPLOYED_ID / VERTEX_ME_INDEX
 
+- DEVIATION_HIGH_MULTIPLIER / DEVIATION_MIN_SCORE: escalate to HIGH when amount >= N× typical (default N=9, min score 0.8)
+
 
 ## ADK/MCP/A2A usage
 - MCP Gateway stores and serves transactions, supports service-to-service calls
