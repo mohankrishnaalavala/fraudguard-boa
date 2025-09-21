@@ -1,6 +1,6 @@
 # FraudGuard on GKE — Bank of Anthos (API-only extension)
 
-**One-liner:** Agentic fraud risk analysis for **Bank of Anthos** on **GKE Autopilot** using **Gemini / Vertex AI** — **no BoA core changes**.  
+**One-liner:** Agentic fraud risk analysis for **Bank of Anthos** on **GKE Autopilot** using **Gemini / Vertex AI** — **no BoA core changes**.
 **Same cluster:** namespaces **`boa`** (BoA) and **`fraudguard`** (FraudGuard).
 
 ## Problem
@@ -18,43 +18,44 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 ---
 
 ## What it does (30-sec read)
-- Reads BoA transactions via **JWT + APIs**, normalizes, and posts to the pipeline.  
-- Scores risk with **Gemini/Vertex AI** using recent history for velocity, deviation, and recipient patterns.  
-- Explains each decision and displays **High / Medium / Low** on a **read-only** dashboard.  
-- **action-orchestrator** can hold/flag via BoA API.
+- Reads BoA transactions via **JWT + APIs**, normalizes, and posts to the pipeline.
+- Scores risk with **Gemini/Vertex AI** using recent history for velocity, deviation, and recipient patterns.
+- Explains each decision and displays **High / Medium / Low** on a **read-only** dashboard.
+- **action-orchestrator** centralizes action execution (notify/step-up/hold/allow) and isolates BoA API calls.
 
-**Core components:** `boa-monitor → mcp-gateway → risk-scorer → explain-agent → dashboard` (+ optional `action-orchestrator`).  
+**Core components:** `boa-monitor → mcp-gateway → risk-scorer → explain-agent → dashboard` (+ optional `action-orchestrator`).
 **Security/ops:** Workload Identity, Secret Manager CSI, NetworkPolicy, non-root containers, Managed Certs, Cloud Logging/Monitoring.
 
 ---
 
 ## Components on GKE (brief)
-- **mcp-gateway** — ingest & history APIs for services/UI  
-- **boa-monitor** — authenticates to BoA, fetches history, forwards events  
+- **mcp-gateway** — ingest & history APIs for services/UI
+- **boa-monitor** — authenticates to BoA, fetches history, forwards events
 - **risk-scorer** — Gemini/Vertex AI analysis with RAG over recent **N** (default 50). Default model via Helm: gemini-2.5-flash
-- **explain-agent** — rationale/audit store  
-- **action-orchestrator** — can hold/flag via BoA API  
+- **explain-agent** — rationale/audit store
+- **action-orchestrator** — executes actions (notify/step-up/hold/allow); isolates BoA API calls; returns ActionResult
 - **dashboard** — Flask UI; tri-level risk (read-only)
 
+
 ## AI models used (brief)
-- **Gemini 2.5 Flash** (Generative Language API) and/or **Vertex AI** (configurable)  
+- **Gemini 2.5 Flash** (Generative Language API) and/or **Vertex AI** (configurable)
 - RAG over the **last 50** transactions by default (pattern/velocity/recipient signals)
 
 ## Optional components (used)
-- **MCP-style gateway** for discoverable service tools/endpoints  
-- **A2A service-to-service** calls inside the cluster, restricted by **NetworkPolicies**  
+- **MCP-style gateway** for discoverable service tools/endpoints
+- **A2A service-to-service** calls inside the cluster, restricted by **NetworkPolicies**
 > Details, commands, and toggles are in **TECHNICAL.md**.
 
 ---
 
 ## Quickstart (≤ 5 minutes)
-1. Open **BoA** and make a transfer: https://boa.mohankrishna.site/  
+1. Open **BoA** and make a transfer: https://boa.mohankrishna.site/
 2. Open **FraudGuard dashboard**: https://fraudguard.mohankrishna.site/ *(user/pass: `admin` / `admin`)*
-3. See the bucket update (**High / Medium / Low**) and rationale text.  
+3. See the bucket update (**High / Medium / Low**) and rationale text.
 4. Need deploy/env/API details? See **[TECHNICAL.md](./TECHNICAL.md)**.
 
 ---
-## quicktest
+## Quicktest
 
 Quick ways to validate end-to-end using the real Bank of Anthos UI and the FraudGuard dashboard. Please use your BoA demo user for login.
 
@@ -89,7 +90,7 @@ Expected
 ## Screenshots
 - BoA transfer
 ![BoA transfer](images/boatransaction.png)
-- FraudGuard login & dashboard 
+- FraudGuard login & dashboard
 ![FraudGuard login](images/login.png)
 ![FraudGuard dashboard](images/dashboard.png)
 
