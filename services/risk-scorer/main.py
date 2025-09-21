@@ -11,28 +11,45 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-import structlog
+# Prefer structured JSON logs via structlog; fallback to stdlib if unavailable
+try:
+    import structlog  # type: ignore
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.JSONRenderer(),
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+    logger = structlog.get_logger()
+except Exception:
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO)
 
-# Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
+    class _ShimLogger:
+        def __init__(self, name: str = "risk-scorer") -> None:
+            self._l = _logging.getLogger(name)
 
-logger = structlog.get_logger()
+        def info(self, event: str, **kw):
+            self._l.info("%s %s", event, kw)
+
+        def error(self, event: str, **kw):
+            self._l.error("%s %s", event, kw)
+
+        def warning(self, event: str, **kw):
+            self._l.warning("%s %s", event, kw)
+
+    logger = _ShimLogger()
 
 # Configuration
 PORT = int(os.getenv("PORT", "8080"))
@@ -63,6 +80,10 @@ USE_VERTEX_MATCHING = os.getenv("USE_VERTEX_MATCHING", "false").lower() == "true
 VERTEX_EMBED_MODEL = os.getenv("VERTEX_EMBED_MODEL", "text-embedding-004")
 VERTEX_ME_INDEX_ENDPOINT = os.getenv("VERTEX_ME_INDEX_ENDPOINT", "")  # projects/../locations/../indexEndpoints/...
 VERTEX_ME_INDEX_DEPLOYED_ID = os.getenv("VERTEX_ME_INDEX_DEPLOYED_ID", "")
+# Risk escalation rule: new recipient over amount threshold -> high risk
+NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD = float(os.getenv("NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD", "999"))
+NEW_RECIPIENT_MIN_SCORE = float(os.getenv("NEW_RECIPIENT_MIN_SCORE", "0.8"))
+
 
 # Load API key from file (Secret Manager CSI) if provided
 if GEMINI_API_KEY_FILE:
@@ -292,6 +313,7 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
     import statistics
     recipients_amounts: dict[str, list[float]] = defaultdict(list)
     recipients_last_seen: dict[str, str] = {}
+    recipients_first_seen: dict[str, str] = {}
     hours: list[int] = []
     weekdays: list[int] = []
     amounts: list[float] = []
@@ -321,7 +343,10 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
         if recipient_key and recipient_key != "unknown_recipient":
             recipients_amounts[recipient_key].append(amt)
             if ts:
+                # Track last and first seen timestamps as ISO strings
                 recipients_last_seen[recipient_key] = str(ts)
+                if recipient_key not in recipients_first_seen:
+                    recipients_first_seen[recipient_key] = str(ts)
 
     top_known = []
     for m, vals in recipients_amounts.items():
@@ -347,6 +372,8 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
     # Ensure subtraction between timezone-aware datetimes in UTC
     count_last_15m = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 15 * 60)
     count_last_60m = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 60 * 60)
+    # Account activity in last 30 days
+    count_last_30d = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 30 * 24 * 3600)
 
     return {
         "known_recipients": top_known[:10],
@@ -355,6 +382,8 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
         "weekday_count": weekday_count,
         "weekend_count": weekend_count,
         "velocity": {"count_last_15m": count_last_15m, "count_last_60m": count_last_60m},
+        "account_tx_count_30d": int(count_last_30d),
+        "recipient_first_seen": recipients_first_seen,
         "history_count": len(history)
     }
 
@@ -394,10 +423,30 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
         vel = rag_summary.get("velocity", {})
         v15 = int(vel.get("count_last_15m", 0))
         v60 = int(vel.get("count_last_60m", 0))
+        # new numeric context for tighter grounding
+        recipient_tx_count = int(known_map.get(recipient_key, {}).get("count", 0)) if is_known else 0
+        # recipient first-seen age in days (if present)
+        recipient_first_seen_days = None
+        try:
+            rfs_map = rag_summary.get("recipient_first_seen", {}) or {}
+            rfs = rfs_map.get(recipient_key)
+            if rfs:
+                rfs_dt = datetime.fromisoformat(str(rfs).replace("Z", "+00:00"))
+                if rfs_dt.tzinfo is None:
+                    rfs_dt = rfs_dt.replace(tzinfo=timezone.utc)
+                now_ref = datetime.now(timezone.utc)
+                recipient_first_seen_days = max(0, int((now_ref - rfs_dt.astimezone(timezone.utc)).total_seconds() // 86400))
+        except Exception:
+            recipient_first_seen_days = None
+        account_tx_count_30d = int(rag_summary.get("account_tx_count_30d", 0) or 0)
+
         signals = {
             "known_recipient": bool(is_known),
             "new_recipient": (not is_known) and bool(recipient_key) and recipient_key != "unknown_recipient",
             "recipient_key": recipient_key,  # For debugging
+            "recipient_tx_count": recipient_tx_count,
+            "recipient_first_seen_days": recipient_first_seen_days,
+            "account_tx_count_30d": account_tx_count_30d,
             "amount_deviation_from_known": deviation_ratio,
             "amount_deviation_flag": deviation_ratio is not None and deviation_ratio >= 1.5,
             "off_hours": bool(off_hours),
@@ -1233,6 +1282,44 @@ async def analyze_transaction(transaction: Transaction):
             "timestamp": transaction.timestamp.isoformat(),
         }
         pattern_signals = analyze_pattern_signals(tx_payload, rag_summary)
+
+        # Fast-path: deterministic business rule to avoid upstream timeouts
+        try:
+            amt_for_rule = float(tx_payload.get("amount", 0) or 0)
+            ps = (pattern_signals or {})
+            is_new_flag = bool(ps.get("new_recipient"))
+            rec_count = int(ps.get("recipient_tx_count", 0) or 0)
+            first_seen_days = ps.get("recipient_first_seen_days")
+            is_new_effective = is_new_flag or (rec_count <= 1 and (first_seen_days is None or int(first_seen_days) <= 0))
+            threshold = NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD
+            if is_new_effective and amt_for_rule > threshold:
+                base_score, _ = heuristic_risk_from_tx(tx_payload)
+                score_val = max(float(base_score), NEW_RECIPIENT_MIN_SCORE)
+                add_reason = f"New recipient and amount ${amt_for_rule:.2f} exceeds ${threshold:.2f}; escalated."
+                rationale_val = add_reason
+                logger.info(
+                    "rule_escalation_applied",
+                    rule="new_recipient_amount_fastpath",
+                    amount=amt_for_rule,
+                    threshold=threshold,
+                    prev_score=base_score,
+                    new_score=score_val,
+                )
+                risk_score = RiskScore(
+                    transaction_id=transaction.transaction_id,
+                    risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+                    rationale=rationale_val,
+                    timestamp=datetime.utcnow()
+                )
+                logger.info(
+                    "risk_analysis_completed",
+                    transaction_id=transaction.transaction_id,
+                    risk_score=risk_score.risk_score
+                )
+                return risk_score
+        except Exception as e:
+            logger.error("rule_escalation_failed", error=str(e))
+
         # Optional: Vector neighbor context via Vertex Matching Engine (only allowed fields)
         vector_context = None
         if USE_VERTEX_MATCHING:
@@ -1403,6 +1490,32 @@ async def analyze_transaction(transaction: Transaction):
                     rationale_val = baseline_rationale
         except Exception:
             pass
+
+        # Business rule: escalate to high risk for NEW recipient over threshold (no PII)
+        try:
+            amt_for_rule = float((tx_payload.get("amount", 0) if 'tx_payload' in locals() else getattr(transaction, "amount", 0)) or 0)
+            ps = (pattern_signals or {})
+            is_new_flag = bool(ps.get("new_recipient"))
+            rec_count = int(ps.get("recipient_tx_count", 0) or 0)
+            first_seen_days = ps.get("recipient_first_seen_days")
+            # Consider effectively new if model flagged new or if this looks like first occurrence
+            is_new_recipient = is_new_flag or (rec_count <= 1 and (first_seen_days is None or int(first_seen_days) <= 0))
+            threshold = NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD
+            if is_new_recipient and amt_for_rule > threshold:
+                prev_score = float(score_val)
+                score_val = max(prev_score, NEW_RECIPIENT_MIN_SCORE)
+                add_reason = f"New recipient and amount ${amt_for_rule:.2f} exceeds ${threshold:.2f}; escalated."
+                rationale_val = (str(rationale_val or "").strip() + " " + add_reason).strip() if rationale_val else add_reason
+                logger.info(
+                    "rule_escalation_applied",
+                    rule="new_recipient_amount",
+                    amount=amt_for_rule,
+                    threshold=threshold,
+                    prev_score=prev_score,
+                    new_score=score_val,
+                )
+        except Exception as e:
+            logger.error("rule_escalation_failed", error=str(e))
 
         # Create risk score response
         risk_score = RiskScore(

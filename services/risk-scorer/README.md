@@ -18,6 +18,9 @@ Environment:
 - EXPLAIN_AGENT_URL: base URL for explain-agent
 - MCP_GATEWAY_URL: for history retrieval
 
+- NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD: dollar amount above which a first-time recipient is escalated (default: 999)
+- NEW_RECIPIENT_MIN_SCORE: minimum risk_score to enforce when rule triggers (default: 0.8)
+
 Logging (JSON, no PII):
 - pattern_signals: known_recipient, amount_deviation_flag, off_hours, velocity_15m/60m, velocity_flag
 - ai_invoke: model selection and RAG size (no sensitive fields)
