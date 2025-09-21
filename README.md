@@ -36,14 +36,6 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 - **action-orchestrator** — executes actions (notify/step-up/hold/allow); isolates BoA API calls; returns ActionResult
 - **dashboard** — Flask UI; tri-level risk (read-only)
 
-### Why action-orchestrator?
-- Decouples AI reasoning (explain-agent) from privileged action execution and BoA A2A calls
-- Single, consistent API for actions: POST /execute and GET /thresholds (plus GET /healthz)
-- Security boundary: least-privileged SA, NetworkPolicy egress only to BoA, runAsNonRoot, readOnlyRootFilesystem; no secrets in code
-- Auditable outcomes: returns ActionResult and writes JSON logs with {event, txn_id, severity}; no PII
-- Production-ready path: today simulates BoA calls; enable real A2A via BOA_BASE_URL under policy controls
-
-See also: services/action-orchestrator/README.md and API.md (action-orchestrator)
 
 ## AI models used (brief)
 - **Gemini 2.5 Flash** (Generative Language API) and/or **Vertex AI** (configurable)
@@ -63,7 +55,7 @@ See also: services/action-orchestrator/README.md and API.md (action-orchestrator
 4. Need deploy/env/API details? See **[TECHNICAL.md](./TECHNICAL.md)**.
 
 ---
-## quicktest
+## Quicktest
 
 Quick ways to validate end-to-end using the real Bank of Anthos UI and the FraudGuard dashboard. Please use your BoA demo user for login.
 
