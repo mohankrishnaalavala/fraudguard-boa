@@ -49,12 +49,36 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 
 ## Quickstart (≤ 5 minutes)
 1. Open **BoA** and make a transfer: https://boa.mohankrishna.site/  
-2. Open **FraudGuard dashboard**: https://fraudguard.mohankrishna.site/ *(admin/admin)*  
+2. Open **FraudGuard dashboard**: https://fraudguard.mohankrishna.site/ *(user/pass: `admin` / `admin`)*
 3. See the bucket update (**High / Medium / Low**) and rationale text.  
 4. Need deploy/env/API details? See **[TECHNICAL.md](./TECHNICAL.md)**.
 
 ---
+## quicktest
 
+Quick ways to validate end-to-end using the real Bank of Anthos UI and the FraudGuard dashboard. Please use your BoA demo user for login.
+
+1) New recipient transaction (expect HIGH if amount > $999)
+Steps
+- Log in to BoA and create a transfer to a recipient you have never paid before (new label/account)
+- Amount: pick > $1,000 (e.g., $1,100)
+- Wait ~15–30s for ingest; if needed, click Manual Sync in the dashboard or call MCP Gateway POST /api/manual-sync
+Expected
+- Risk: High (score ≥ 0.8)
+- Rationale includes: "New recipient and amount $X exceeds $999.00; escalated."
+- Logs: risk-scorer emits event=rule_escalation_applied rule=new_recipient_amount_fastpath; no PII in logs
+
+2) Existing recipient with large deviation (expect HIGH if amount ≥ 9× typical)
+Prepare
+- Send 2–3 small transfers to the SAME recipient (e.g., $100–$200) to establish a typical amount
+Test
+- Send a much larger transfer to the same recipient (≥ 9× typical; e.g., $2,000 if typical ~$200)
+Expected
+- Risk: High (score ≥ 0.8)
+- Rationale includes: "Amount $X is N× higher than typical $T (recipient/account); escalated."
+- Logs: risk-scorer event=rule_escalation_applied rule=amount_vs_typical_fastpath (or amount_vs_typical)
+
+---
 ## Architecture
 ![FraudGuard Architecture](images/architecture.png)
 
@@ -65,7 +89,7 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 ## Screens (replace with captures)
 - BoA transfer
 ![BoA transfer](images/boatransaction.png)
-- FraudGuard dashboard 
+- FraudGuard login & dashboard 
 ![FraudGuard login](images/login.png)
 ![FraudGuard dashboard](images/dashboard.png)
 
