@@ -2,7 +2,7 @@ nameOverride: risk-scorer
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/risk-scorer
-  tag: latest
+  tag: fixissue-4b11ba8
   pullPolicy: Always
 
 replicaCount: 1
@@ -25,19 +25,47 @@ container:
     - name: MCP_GATEWAY_URL
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: USE_VERTEX_AI
-      value: "false"
+      value: "true"
     - name: USE_VERTEX_SDK
       value: "false"
     - name: PREFER_GL_API
-      value: "true"
+      value: "false"
     - name: FORCE_GL_OAUTH
-      value: "true"
+      value: "false"
     - name: RAG_INCLUDE_BOA
       value: "true"
+    - name: USE_VERTEX_MATCHING
+      value: "true"
+    - name: VERTEX_EMBED_MODEL
+      value: "text-embedding-004"
+    - name: VERTEX_ME_INDEX_ENDPOINT
+      value: "projects/237184630181/locations/us-central1/indexEndpoints/259328613503991808"
+    - name: VERTEX_ME_INDEX_DEPLOYED_ID
+      value: "fraudguard_transactions_1"
     - name: BOA_USERSERVICE_URL
       value: "http://userservice.boa.svc.cluster.local:8080"
     - name: BOA_HISTORY_URL
       value: "http://transactionhistory.boa.svc.cluster.local:8080"
+    # Vector upsert + RAG controls
+    - name: ENABLE_VECTOR_UPSERTS
+      value: "true"
+    - name: RAG_HISTORY_LIMIT
+      value: "50"
+    # Optional: Index resource for upserts (projects/.../locations/.../indexes/INDEX_ID)
+    - name: VERTEX_ME_INDEX
+      value: ""
+    # Business rule thresholds: escalate new recipient over amount to HIGH
+    - name: NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD
+      value: "999"
+    - name: NEW_RECIPIENT_MIN_SCORE
+      value: "0.8"
+    # Amount deviation escalation: amount >= N x typical → HIGH
+    - name: DEVIATION_HIGH_MULTIPLIER
+      value: "9"
+    - name: DEVIATION_MIN_SCORE
+      value: "0.8"
+
+
   envFrom:
     - name: risk-scorer-gemini
     - name: boa-api-credentials
@@ -54,8 +82,8 @@ startupProbe:
 
 resources:
   requests:
-    cpu: "100m"
-    memory: "256Mi"
+    cpu: "50m"
+    memory: "192Mi"
   limits:
     cpu: "500m"
     memory: "1Gi"
@@ -63,6 +91,9 @@ resources:
 service:
   type: ClusterIP
   port: 8080
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "fg-backendconfig"}'
 
 hpa:
   enabled: true
@@ -128,6 +159,15 @@ networkPolicy:
         - namespaceSelector:
             matchLabels:
               name: fraudguard
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow GCLB health checks
+    - from:
+        - ipBlock:
+            cidr: 35.191.0.0/16
+        - ipBlock:
+            cidr: 130.211.0.0/22
       ports:
         - protocol: TCP
           port: 8080

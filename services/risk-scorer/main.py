@@ -8,31 +8,50 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+import asyncio
+
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-import structlog
+# Prefer structured JSON logs via structlog; fallback to stdlib if unavailable
+try:
+    import structlog  # type: ignore
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.JSONRenderer(),
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+    logger = structlog.get_logger()
+except Exception:
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO)
 
-# Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
+    class _ShimLogger:
+        def __init__(self, name: str = "risk-scorer") -> None:
+            self._l = _logging.getLogger(name)
 
-logger = structlog.get_logger()
+        def info(self, event: str, **kw):
+            self._l.info("%s %s", event, kw)
+
+        def error(self, event: str, **kw):
+            self._l.error("%s %s", event, kw)
+
+        def warning(self, event: str, **kw):
+            self._l.warning("%s %s", event, kw)
+
+    logger = _ShimLogger()
 
 # Configuration
 PORT = int(os.getenv("PORT", "8080"))
@@ -57,6 +76,24 @@ BOA_USERSERVICE_URL = os.getenv("BOA_USERSERVICE_URL", "http://userservice.boa.s
 BOA_HISTORY_URL = os.getenv("BOA_HISTORY_URL", "http://transactionhistory.boa.svc.cluster.local:8080")
 BOA_USERNAME = os.getenv("BOA_USERNAME", "")
 BOA_PASSWORD = os.getenv("BOA_PASSWORD", "")
+
+# Vertex Matching Engine (Vector Search) config
+USE_VERTEX_MATCHING = os.getenv("USE_VERTEX_MATCHING", "false").lower() == "true"
+ENABLE_VECTOR_UPSERTS = os.getenv("ENABLE_VECTOR_UPSERTS", "false").lower() == "true"
+VERTEX_EMBED_MODEL = os.getenv("VERTEX_EMBED_MODEL", "text-embedding-004")
+VERTEX_ME_INDEX_ENDPOINT = os.getenv("VERTEX_ME_INDEX_ENDPOINT", "")  # projects/../locations/../indexEndpoints/...
+VERTEX_ME_INDEX_DEPLOYED_ID = os.getenv("VERTEX_ME_INDEX_DEPLOYED_ID", "")
+VERTEX_ME_INDEX = os.getenv("VERTEX_ME_INDEX", "")  # projects/../locations/../indexes/...
+# Risk escalation rule: new recipient over amount threshold -> high risk
+NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD = float(os.getenv("NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD", "999"))
+NEW_RECIPIENT_MIN_SCORE = float(os.getenv("NEW_RECIPIENT_MIN_SCORE", "0.8"))
+# RAG history window
+RAG_HISTORY_LIMIT = int(os.getenv("RAG_HISTORY_LIMIT", "50"))
+
+# Amount deviation rule: escalate when amount >= N x typical (recipient/account)
+DEVIATION_HIGH_MULTIPLIER = float(os.getenv("DEVIATION_HIGH_MULTIPLIER", "9"))
+DEVIATION_MIN_SCORE = float(os.getenv("DEVIATION_MIN_SCORE", "0.8"))
+
 
 # Load API key from file (Secret Manager CSI) if provided
 if GEMINI_API_KEY_FILE:
@@ -234,12 +271,15 @@ async def fetch_account_history(account_id: str, limit: int = 100) -> list[dict]
         logger.warning("history_fetch_failed", source="mcp", account_id=account_id, error=str(e))
 
     # 2) Bank of Anthos (optional) - Additional historical context
-    try:
-        boa_hist = await fetch_boa_history_for_account(account_id, limit=limit)
-        combined.extend(boa_hist)
-        logger.info("boa_history_added", account_id=account_id, boa_count=len(boa_hist), total_count=len(combined))
-    except Exception as e:
-        logger.info("boa_history_not_used", account_id=account_id, error=str(e))
+    if RAG_INCLUDE_BOA:
+        try:
+            boa_hist = await fetch_boa_history_for_account(account_id, limit=limit)
+            combined.extend(boa_hist)
+            logger.info("boa_history_added", account_id=account_id, boa_count=len(boa_hist), total_count=len(combined))
+        except Exception as e:
+            logger.info("boa_history_not_used", account_id=account_id, error=str(e))
+    else:
+        logger.info("boa_history_skipped", account_id=account_id)
 
     # Deduplicate by minimal signature (timestamp+amount+merchant)
     seen = set()
@@ -283,6 +323,7 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
     import statistics
     recipients_amounts: dict[str, list[float]] = defaultdict(list)
     recipients_last_seen: dict[str, str] = {}
+    recipients_first_seen: dict[str, str] = {}
     hours: list[int] = []
     weekdays: list[int] = []
     amounts: list[float] = []
@@ -312,7 +353,10 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
         if recipient_key and recipient_key != "unknown_recipient":
             recipients_amounts[recipient_key].append(amt)
             if ts:
+                # Track last and first seen timestamps as ISO strings
                 recipients_last_seen[recipient_key] = str(ts)
+                if recipient_key not in recipients_first_seen:
+                    recipients_first_seen[recipient_key] = str(ts)
 
     top_known = []
     for m, vals in recipients_amounts.items():
@@ -338,6 +382,8 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
     # Ensure subtraction between timezone-aware datetimes in UTC
     count_last_15m = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 15 * 60)
     count_last_60m = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 60 * 60)
+    # Account activity in last 30 days
+    count_last_30d = sum(1 for dt in timestamps if (now_ref - dt.astimezone(timezone.utc)).total_seconds() <= 30 * 24 * 3600)
 
     return {
         "known_recipients": top_known[:10],
@@ -346,6 +392,8 @@ def summarize_history_for_rag(history: list[dict]) -> dict:
         "weekday_count": weekday_count,
         "weekend_count": weekend_count,
         "velocity": {"count_last_15m": count_last_15m, "count_last_60m": count_last_60m},
+        "account_tx_count_30d": int(count_last_30d),
+        "recipient_first_seen": recipients_first_seen,
         "history_count": len(history)
     }
 
@@ -385,21 +433,181 @@ def analyze_pattern_signals(tx: dict, rag_summary: dict) -> dict:
         vel = rag_summary.get("velocity", {})
         v15 = int(vel.get("count_last_15m", 0))
         v60 = int(vel.get("count_last_60m", 0))
+        # new numeric context for tighter grounding
+        recipient_tx_count = int(known_map.get(recipient_key, {}).get("count", 0)) if is_known else 0
+        # recipient first-seen age in days (if present)
+        recipient_first_seen_days = None
+        try:
+            rfs_map = rag_summary.get("recipient_first_seen", {}) or {}
+            rfs = rfs_map.get(recipient_key)
+            if rfs:
+                rfs_dt = datetime.fromisoformat(str(rfs).replace("Z", "+00:00"))
+                if rfs_dt.tzinfo is None:
+                    rfs_dt = rfs_dt.replace(tzinfo=timezone.utc)
+                now_ref = datetime.now(timezone.utc)
+                recipient_first_seen_days = max(0, int((now_ref - rfs_dt.astimezone(timezone.utc)).total_seconds() // 86400))
+        except Exception:
+            recipient_first_seen_days = None
+        account_tx_count_30d = int(rag_summary.get("account_tx_count_30d", 0) or 0)
+
         signals = {
             "known_recipient": bool(is_known),
             "new_recipient": (not is_known) and bool(recipient_key) and recipient_key != "unknown_recipient",
             "recipient_key": recipient_key,  # For debugging
+            "recipient_tx_count": recipient_tx_count,
+            "recipient_first_seen_days": recipient_first_seen_days,
+            "account_tx_count_30d": account_tx_count_30d,
             "amount_deviation_from_known": deviation_ratio,
             "amount_deviation_flag": deviation_ratio is not None and deviation_ratio >= 1.5,
             "off_hours": bool(off_hours),
             "weekend_bias": weekend_bias,
             "velocity_15m": v15,
             "velocity_60m": v60,
-            "velocity_flag": (v15 >= 3) or (v60 >= 5)
+            "velocity_flag": (v15 >= 3) or (v60 >= 5),
         }
         return signals
     except Exception:
         return {"signal_error": True}
+
+# === Vertex Matching Engine helpers (embeddings + ANN retrieval) ===
+async def _embed_text(text: str) -> list[float]:
+    """Get embedding vector for text using Vertex Text Embeddings. Never crash caller."""
+    try:
+        import anyio
+        def _sync_embed() -> list[float]:
+            from vertexai import init
+            # Try both import paths for TextEmbeddingModel (SDK variations)
+            try:
+                from vertexai.language_models import TextEmbeddingModel  # type: ignore
+            except Exception:
+                from vertexai.preview.language_models import TextEmbeddingModel  # type: ignore
+            init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            model = TextEmbeddingModel.from_pretrained(VERTEX_EMBED_MODEL)
+            resp = model.get_embeddings(
+                [text],
+                output_dimensionality=None
+            )
+            vec = resp[0].values if resp and resp[0] else []
+            return list(vec) if vec else []
+        return await anyio.to_thread.run_sync(_sync_embed)
+    except Exception as e:
+        logger.info("embedding_failed", error=str(e))
+        return []
+
+
+def _build_embedding_text(tx: dict) -> str:
+    """Construct embedding text ONLY from allowed BoA fields: account_id, label, date, type, amount.
+    Do NOT include merchant/category/location.
+    """
+    acct = str(tx.get("account_id", ""))
+    label = str(tx.get("label", "") or "")  # may be empty
+    ts = str(tx.get("timestamp", ""))
+    # normalize date only
+    date_only = ts.split("T")[0] if ts else ""
+    tx_type = str(tx.get("type", "unknown"))
+    amt = float(tx.get("amount", 0) or 0)
+    return f"account:{acct} label:{label} date:{date_only} type:{tx_type} amount:{amt:.2f}"
+
+
+async def _me_find_neighbor_ids(query_vec: list[float], k: int = 20) -> list[str]:
+    """Query Matching Engine for nearest neighbor IDs. Returns [] on failure."""
+    if not (VERTEX_ME_INDEX_ENDPOINT and VERTEX_ME_INDEX_DEPLOYED_ID):
+        return []
+    try:
+        import anyio
+        def _sync_query() -> list[str]:
+            from google.cloud import aiplatform
+            aiplatform.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            ie = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VERTEX_ME_INDEX_ENDPOINT)
+            res = ie.find_neighbors(
+                deployed_index_id=VERTEX_ME_INDEX_DEPLOYED_ID,
+                queries=[query_vec],
+                num_neighbors=k,
+            )
+            # res is a list with one entry per query
+            neighbors = res[0] if res else []
+            ids: list[str] = []
+            for n in neighbors:
+                try:
+                    ids.append(str(getattr(n, "id", None) or getattr(n, "datapoint_id", "")))
+                except Exception:
+                    pass
+            return [i for i in ids if i]
+        return await anyio.to_thread.run_sync(_sync_query)
+    except Exception as e:
+        logger.info("me_query_failed", error=str(e))
+
+async def _me_upsert_vector(tx_id: str, vec: list[float]) -> None:
+    """Background upsert into Vertex Matching Engine index. Best-effort, never crash caller."""
+    if not (USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS):
+        return
+    if not VERTEX_ME_INDEX:
+        logger.info("vector_upsert_skipped", reason="no_index_configured")
+        return
+    try:
+        import anyio
+        def _sync_upsert() -> None:
+            from google.cloud import aiplatform
+            aiplatform.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            # MatchingEngineIndexDatapoint is available via aiplatform
+            from google.cloud.aiplatform.matching_engine import MatchingEngineIndexDatapoint  # type: ignore
+            index = aiplatform.MatchingEngineIndex(index_name=VERTEX_ME_INDEX)
+            dp = MatchingEngineIndexDatapoint(datapoint_id=str(tx_id), feature_vector=list(vec))
+            index.upsert_datapoints([dp])
+        await anyio.to_thread.run_sync(_sync_upsert)
+        logger.info("vector_upsert_ok", tx_id=str(tx_id), dims=len(vec))
+    except Exception as e:
+        logger.info("vector_upsert_failed", error=str(e))
+
+
+
+async def _fetch_minimal_txns_by_ids(ids: list[str]) -> list[dict]:
+    if not ids:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{MCP_GATEWAY_URL}/api/transactions/by-ids",
+                json={"ids": ids},
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return list(data.get("transactions", [])) if isinstance(data, dict) else []
+    except Exception as e:
+        logger.info("fetch_by_ids_failed", error=str(e))
+    return []
+
+
+def _summarize_neighbors_minimal(neighbors: list[dict]) -> dict:
+    """Summarize neighbor set using allowed fields only."""
+    import statistics
+    amounts = [float(x.get("amount", 0) or 0) for x in neighbors]
+    types = [str(x.get("type", "unknown") or "unknown").lower() for x in neighbors]
+    dates = []
+    for x in neighbors:
+        ts = str(x.get("timestamp", ""))
+        try:
+            dates.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+        except Exception:
+            pass
+    typical_amount = round(statistics.median(amounts), 2) if amounts else 0
+    credit = sum(1 for t in types if t.startswith("credit"))
+    debit = sum(1 for t in types if t.startswith("debit"))
+    recency_days = None
+    try:
+        if dates:
+            latest = max(dates)
+            recency_days = max(0, int((datetime.now(timezone.utc) - latest.astimezone(timezone.utc)).total_seconds() // 86400))
+    except Exception:
+        recency_days = None
+    return {
+        "neighbor_count": len(neighbors),
+        "typical_amount": typical_amount,
+        "type_breakdown": {"credit": credit, "debit": debit},
+        "recency_days": recency_days,
+    }
+
 
 
 # Local heuristic as a last-resort when AI output is unavailable/unparsable
@@ -980,6 +1188,7 @@ async def call_gemini_api(prompt: str) -> dict:
                     return ""
                 return ""
             pieces = []
+
             for p in parts:
                 if not isinstance(p, dict):
                     continue
@@ -1085,8 +1294,8 @@ async def analyze_transaction(transaction: Transaction):
             amount=transaction.amount
         )
 
-        # RAG: fetch and summarize account history
-        history = await fetch_account_history(transaction.account_id, limit=50)
+        # RAG: fetch and summarize account history (env-controlled window)
+        history = await fetch_account_history(transaction.account_id, limit=RAG_HISTORY_LIMIT)
         try:
             rag_summary = summarize_history_for_rag(history)
         except Exception as e:
@@ -1105,7 +1314,216 @@ async def analyze_transaction(transaction: Transaction):
             "timestamp": transaction.timestamp.isoformat(),
         }
         pattern_signals = analyze_pattern_signals(tx_payload, rag_summary)
+
+        # Fast-path: deterministic business rule to avoid upstream timeouts
+        try:
+            amt_for_rule = float(tx_payload.get("amount", 0) or 0)
+            ps = (pattern_signals or {})
+            is_new_flag = bool(ps.get("new_recipient"))
+            rec_count = int(ps.get("recipient_tx_count", 0) or 0)
+            first_seen_days = ps.get("recipient_first_seen_days")
+            is_new_effective = is_new_flag or (rec_count <= 1 and (first_seen_days is None or int(first_seen_days) <= 0))
+            threshold = NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD
+            if is_new_effective and amt_for_rule > threshold:
+                base_score, _ = heuristic_risk_from_tx(tx_payload)
+                score_val = max(float(base_score), NEW_RECIPIENT_MIN_SCORE)
+                add_reason = f"New recipient and amount ${amt_for_rule:.2f} exceeds ${threshold:.2f}; escalated."
+                rationale_val = add_reason
+                logger.info(
+                    "rule_escalation_applied",
+                    rule="new_recipient_amount_fastpath",
+                    amount=amt_for_rule,
+                    threshold=threshold,
+                    prev_score=base_score,
+                    new_score=score_val,
+                )
+                risk_score = RiskScore(
+                    transaction_id=transaction.transaction_id,
+                    risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+                    rationale=rationale_val,
+                    timestamp=datetime.utcnow()
+                )
+                # Fire-and-forget vector upsert (only allowed fields)
+                if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+                    try:
+                        embed_text = _build_embedding_text(tx_payload)
+                        qvec = await _embed_text(embed_text)
+                        if qvec:
+                            asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+                    except Exception as ue:
+                        logger.info("vector_upsert_failed", error=str(ue))
+                logger.info(
+                    "risk_analysis_completed",
+                    transaction_id=transaction.transaction_id,
+                    risk_score=risk_score.risk_score
+                )
+                return risk_score
+
+            # Fast-path: escalate when amount is >= N x typical (prefer recipient-specific typical)
+            try:
+                ratio = None
+                typical = None
+                # Compute typical excluding the current transaction from history
+                import statistics as _stats
+                rk = str((tx_payload.get("label") or "")).lower()
+                cur_id = str(tx_payload.get("transaction_id", ""))
+                amount_val = amt_for_rule
+                _rec_amounts = [float(h.get("amount") or 0) for h in history
+                                if str((h.get("label") or h.get("merchant") or "")).lower() == rk
+                                and str(h.get("transaction_id", "")) != cur_id
+                                and float(h.get("amount") or 0) > 0]
+                typical = None
+                src = None
+                if len(_rec_amounts) >= 1:
+                    try:
+                        typical = float(_stats.median(_rec_amounts))
+                    except Exception:
+                        typical = sum(_rec_amounts) / len(_rec_amounts)
+                    src = "recipient"
+                if typical is None:
+                    _all_amounts = [float(h.get("amount") or 0) for h in history
+                                    if str(h.get("transaction_id", "")) != cur_id and float(h.get("amount") or 0) > 0]
+                    if len(_all_amounts) >= 1:
+                        try:
+                            typical = float(_stats.median(_all_amounts))
+                        except Exception:
+                            typical = sum(_all_amounts) / len(_all_amounts)
+                        src = "account"
+                if typical and typical > 0:
+                    ratio = amount_val / typical
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER:
+                    base_score, _ = heuristic_risk_from_tx(tx_payload)
+                    score_val = max(float(base_score), DEVIATION_MIN_SCORE)
+                    add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
+                    rationale_val = add_reason
+                    logger.info(
+                        "rule_escalation_applied",
+                        rule="amount_vs_typical_fastpath",
+                        ratio=round(ratio, 2),
+                        typical=typical,
+                        source=src,
+                        prev_score=base_score,
+                        new_score=score_val,
+                    )
+                    risk_score = RiskScore(
+                        transaction_id=transaction.transaction_id,
+                        risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+                        rationale=rationale_val,
+                        timestamp=datetime.utcnow()
+                    )
+                    # Fire-and-forget vector upsert (only allowed fields)
+                    if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+                        try:
+                            embed_text = _build_embedding_text(tx_payload)
+                            qvec = await _embed_text(embed_text)
+                            if qvec:
+                                asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+                        except Exception as ue:
+                            logger.info("vector_upsert_failed", error=str(ue))
+                    logger.info(
+                        "risk_analysis_completed",
+                        transaction_id=transaction.transaction_id,
+                        risk_score=risk_score.risk_score
+                    )
+                    return risk_score
+            except Exception as e:
+                logger.error("amount_vs_typical_fastpath_failed", error=str(e))
+            # Fast-path: escalate when amount is >= N x typical (prefer recipient-specific typical)
+            try:
+                ratio = None
+                typical = None
+                # Compute typical excluding the current transaction from history
+                import statistics as _stats
+                rk = str((tx_payload.get("label") or "")).lower()
+                cur_id = str(tx_payload.get("transaction_id", ""))
+                amount_val = amt_for_rule
+                _rec_amounts = [float(h.get("amount") or 0) for h in history
+                                if str((h.get("label") or h.get("merchant") or "")).lower() == rk
+                                and str(h.get("transaction_id", "")) != cur_id
+                                and float(h.get("amount") or 0) > 0]
+                typical = None
+                src = None
+                if len(_rec_amounts) >= 1:
+                    try:
+                        typical = float(_stats.median(_rec_amounts))
+                    except Exception:
+                        typical = sum(_rec_amounts) / len(_rec_amounts)
+                    src = "recipient"
+                if typical is None:
+                    _all_amounts = [float(h.get("amount") or 0) for h in history
+                                    if str(h.get("transaction_id", "")) != cur_id and float(h.get("amount") or 0) > 0]
+                    if len(_all_amounts) >= 1:
+                        try:
+                            typical = float(_stats.median(_all_amounts))
+                        except Exception:
+                            typical = sum(_all_amounts) / len(_all_amounts)
+                        src = "account"
+                if typical and typical > 0:
+                    ratio = amount_val / typical
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER:
+                    base_score, _ = heuristic_risk_from_tx(tx_payload)
+                    score_val = max(float(base_score), DEVIATION_MIN_SCORE)
+                    add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
+                    rationale_val = add_reason
+                    logger.info(
+                        "rule_escalation_applied",
+                        rule="amount_vs_typical_fastpath",
+                        ratio=round(ratio, 2),
+                        typical=typical,
+                        source=src,
+                        prev_score=base_score,
+                        new_score=score_val,
+                    )
+                    risk_score = RiskScore(
+                        transaction_id=transaction.transaction_id,
+                        risk_score=round(min(max(score_val, 0.0), 1.0), 4),
+                        rationale=rationale_val,
+                        timestamp=datetime.utcnow()
+                    )
+                    # Fire-and-forget vector upsert (only allowed fields)
+                    if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+                        try:
+                            embed_text = _build_embedding_text(tx_payload)
+                            qvec = await _embed_text(embed_text)
+                            if qvec:
+                                asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+                        except Exception as ue:
+                            logger.info("vector_upsert_failed", error=str(ue))
+                    logger.info(
+                        "risk_analysis_completed",
+                        transaction_id=transaction.transaction_id,
+                        risk_score=risk_score.risk_score
+                    )
+                    return risk_score
+            except Exception as e:
+                logger.error("amount_vs_typical_fastpath_failed", error=str(e))
+
+        except Exception as e:
+            logger.error("rule_escalation_failed", error=str(e))
+
+        # Optional: Vector neighbor context via Vertex Matching Engine (only allowed fields)
+        vector_context = None
+        if USE_VERTEX_MATCHING:
+            try:
+                embed_text = _build_embedding_text(tx_payload)
+                qvec = await _embed_text(embed_text)
+                if qvec:
+                    ids = await _me_find_neighbor_ids(qvec, k=20)
+                    if ids:
+                        neigh_tx = await _fetch_minimal_txns_by_ids(ids)
+                        if neigh_tx:
+                            vector_context = _summarize_neighbors_minimal(neigh_tx)
+            except Exception as ve:
+                logger.info("vector_context_failed", error=str(ve))
+
         prompt = build_vertex_prompt(tx_payload, rag_summary, pattern_signals)
+        if vector_context:
+            try:
+                import json as _json
+                prompt = prompt + "\n\nVECTOR_NEIGHBOR_SUMMARY: " + _json.dumps(vector_context)
+            except Exception:
+                pass
+
 
         # Debug logging for enhanced prompting
         logger.info(
@@ -1119,6 +1537,8 @@ async def analyze_transaction(transaction: Transaction):
 
         # Build baseline historical rationale (even if AI falls back)
         baseline_rationale = None
+        # Optional: Vector neighbor context via Vertex Matching Engine (only allowed fields)
+
         try:
             recipient_key = str(tx_payload.get("label") or "").lower()
             amount_val = float(tx_payload.get("amount") or 0)
@@ -1252,6 +1672,82 @@ async def analyze_transaction(transaction: Transaction):
         except Exception:
             pass
 
+        # Business rule: escalate to high risk for NEW recipient over threshold (no PII)
+        try:
+            amt_for_rule = float((tx_payload.get("amount", 0) if 'tx_payload' in locals() else getattr(transaction, "amount", 0)) or 0)
+            ps = (pattern_signals or {})
+            is_new_flag = bool(ps.get("new_recipient"))
+            rec_count = int(ps.get("recipient_tx_count", 0) or 0)
+            first_seen_days = ps.get("recipient_first_seen_days")
+            # Consider effectively new if model flagged new or if this looks like first occurrence
+            is_new_recipient = is_new_flag or (rec_count <= 1 and (first_seen_days is None or int(first_seen_days) <= 0))
+            threshold = NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD
+            if is_new_recipient and amt_for_rule > threshold:
+                prev_score = float(score_val)
+                score_val = max(prev_score, NEW_RECIPIENT_MIN_SCORE)
+                add_reason = f"New recipient and amount ${amt_for_rule:.2f} exceeds ${threshold:.2f}; escalated."
+                rationale_val = (str(rationale_val or "").strip() + " " + add_reason).strip() if rationale_val else add_reason
+                logger.info(
+                    "rule_escalation_applied",
+                    rule="new_recipient_amount",
+                    amount=amt_for_rule,
+                    threshold=threshold,
+                    prev_score=prev_score,
+                    new_score=score_val,
+                )
+            # Business rule: escalate when amount >= N x typical (recipient or account)
+            try:
+                ratio = None
+                typical = None
+                src = None
+                amount_val = amt_for_rule
+                # Compute typical excluding the current transaction from history
+                import statistics as _stats
+                rk = str((tx_payload.get("label") or "")).lower()
+                cur_id = str(tx_payload.get("transaction_id", ""))
+                _rec_amounts = [float(h.get("amount") or 0) for h in history
+                                if str((h.get("label") or h.get("merchant") or "")).lower() == rk
+                                and str(h.get("transaction_id", "")) != cur_id
+                                and float(h.get("amount") or 0) > 0]
+                typical = None
+                src = None
+                if len(_rec_amounts) >= 1:
+                    try:
+                        typical = float(_stats.median(_rec_amounts))
+                    except Exception:
+                        typical = sum(_rec_amounts) / len(_rec_amounts)
+                    src = "recipient"
+                if typical is None:
+                    _all_amounts = [float(h.get("amount") or 0) for h in history
+                                    if str(h.get("transaction_id", "")) != cur_id and float(h.get("amount") or 0) > 0]
+                    if len(_all_amounts) >= 1:
+                        try:
+                            typical = float(_stats.median(_all_amounts))
+                        except Exception:
+                            typical = sum(_all_amounts) / len(_all_amounts)
+                        src = "account"
+                if typical and typical > 0:
+                    ratio = amount_val / typical
+                if ratio is not None and ratio >= DEVIATION_HIGH_MULTIPLIER:
+                    prev_score = float(score_val)
+                    score_val = max(prev_score, DEVIATION_MIN_SCORE)
+                    add_reason = f"Amount ${amount_val:.2f} is {ratio:.1f}x higher than typical ${typical:.2f} ({src}); escalated."
+                    rationale_val = (str(rationale_val or "").strip() + " " + add_reason).strip() if rationale_val else add_reason
+                    logger.info(
+                        "rule_escalation_applied",
+                        rule="amount_vs_typical",
+                        ratio=round(ratio, 2),
+                        typical=typical,
+                        source=src,
+                        prev_score=prev_score,
+                        new_score=score_val,
+                    )
+            except Exception as e:
+                logger.error("amount_vs_typical_rule_failed", error=str(e))
+
+        except Exception as e:
+            logger.error("rule_escalation_failed", error=str(e))
+
         # Create risk score response
         risk_score = RiskScore(
             transaction_id=transaction.transaction_id,
@@ -1265,6 +1761,17 @@ async def analyze_transaction(transaction: Transaction):
             transaction_id=transaction.transaction_id,
             risk_score=risk_score.risk_score
         )
+
+        # Fire-and-forget vector upsert (only allowed fields)
+        if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+            try:
+                embed_text = _build_embedding_text(tx_payload)
+                qvec = await _embed_text(embed_text)
+                if qvec:
+                    asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+            except Exception as ue:
+                logger.info("vector_upsert_failed", error=str(ue))
+
 
         # Send to explain agent for further processing
         if not DISABLE_EXPLAIN_AGENT:

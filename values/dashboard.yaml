@@ -2,7 +2,7 @@ nameOverride: dashboard
 
 image:
   repository: us-docker.pkg.dev/fraudguard-hackathon/fraudguard/dashboard
-  tag: latest
+  tag: fixissue-0d3ea77
   pullPolicy: Always
 
 replicaCount: 1
@@ -22,18 +22,25 @@ container:
       value: "http://mcp-gateway.fraudguard.svc.cluster.local:8080"
     - name: REFRESH_INTERVAL_SECONDS
       value: "10"
+    - name: DASHBOARD_USERNAME
+      value: "admin"
+    - name: DASHBOARD_PASSWORD
+      value: "admin"
 
 resources:
   requests:
-    cpu: "50m"
+    cpu: "10m"
     memory: "64Mi"
   limits:
-    cpu: "200m"
+    cpu: "150m"
     memory: "128Mi"
 
 service:
   type: ClusterIP
   port: 8080
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "fg-backendconfig"}'
 
 hpa:
   enabled: true

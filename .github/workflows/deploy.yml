@@ -59,26 +59,18 @@ jobs:
         run: |
           echo "🏗️ Building all FraudGuard services..."
 
-          # Build all services
-          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "boa-monitor")
+          # Build all services (including dashboard)
+          services=("mcp-gateway" "risk-scorer" "explain-agent" "action-orchestrator" "boa-monitor" "dashboard")
 
           for service in "${services[@]}"; do
             echo "🔨 Building $service..."
             docker build -t ${{ env.REGISTRY }}/$service:${{ github.sha }} services/$service/
             docker push ${{ env.REGISTRY }}/$service:${{ github.sha }}
 
-            # Also tag as latest for this environment
+            # Also tag with environment alias (e.g., hackathon)
             docker tag ${{ env.REGISTRY }}/$service:${{ github.sha }} ${{ env.REGISTRY }}/$service:${{ inputs.environment }}
             docker push ${{ env.REGISTRY }}/$service:${{ inputs.environment }}
           done
-
-          # Build dashboard
-          echo "🔨 Building dashboard..."
-          docker build -t ${{ env.REGISTRY }}/dashboard:${{ github.sha }} web/dashboard/
-          docker push ${{ env.REGISTRY }}/dashboard:${{ github.sha }}
-
-          docker tag ${{ env.REGISTRY }}/dashboard:${{ github.sha }} ${{ env.REGISTRY }}/dashboard:${{ inputs.environment }}
-          docker push ${{ env.REGISTRY }}/dashboard:${{ inputs.environment }}
 
       - name: 🎯 Get GKE Credentials
         run: |
@@ -98,19 +90,17 @@ jobs:
           # Create namespace if it doesn't exist
           kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
-          # Update image tags in values files
-          services=("mcp-gateway" "txn-watcher" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
+          # Deploy all services, pinning image tag to this commit SHA for rollout
+          services=("mcp-gateway" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
 
           for service in "${services[@]}"; do
             echo "📦 Deploying $service..."
 
-            # Update the image tag in values file (only the image.tag line)
-            sed -i "s|^\([[:space:]]*tag:\).*|\1 ${{ inputs.environment }}|g" values/$service.yaml
-
-            # Deploy using Helm (longer timeout, atomic rollback, and diagnostics on failure)
+            # Deploy using Helm (set image.tag to commit SHA to force rollout)
             if ! helm upgrade --install "$service" ./helm/workload \
               -f "values/$service.yaml" \
               -n "${{ env.NAMESPACE }}" \
+              --set image.tag="${{ github.sha }}" \
               --atomic --wait --timeout=600s; then
               echo "❌ Helm failed for $service – collecting diagnostics..."
               kubectl get pods -n "${{ env.NAMESPACE }}" -o wide || true
