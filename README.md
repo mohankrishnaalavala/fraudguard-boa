@@ -21,6 +21,13 @@ FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA tran
 - Gemini 2.5 Flash via Generative Language API and/or Vertex AI SDK (configurable)
 - RAG over recent 50 transactions, with pattern/velocity/recipient analysis
 
+### Key config knobs
+- RAG_HISTORY_LIMIT: history window used by risk-scorer for RAG (default 50)
+- USE_VERTEX_MATCHING: enable neighbor retrieval via Vertex Vector Search
+- ENABLE_VECTOR_UPSERTS: auto-upsert analyzed transactions to the index (requires VERTEX_ME_INDEX)
+- VERTEX_EMBED_MODEL / VERTEX_ME_INDEX_ENDPOINT / VERTEX_ME_INDEX_DEPLOYED_ID / VERTEX_ME_INDEX
+
+
 ## ADK/MCP/A2A usage
 - MCP Gateway stores and serves transactions, supports service-to-service calls
 - A2A style internal calls with NetworkPolicies and least-privileged SAs
@@ -96,6 +103,6 @@ Notes:
 ## License
 Apache 2.0 (inherits from BoA and this repo)
 
-## Submission page 
+## Submission page
 This solution deploys fully on Google Kubernetes Engine (GKE Autopilot) and uses Google AI (Gemini) for fraud analysis. It integrates with the open-source Bank of Anthos application strictly via APIs and services with no changes to BoA core. The architecture includes MCP Gateway, BoA Monitor, Risk Scorer (Gemini), Explain Agent, and a tri-level risk Dashboard on GKE, secured by NetworkPolicies and Managed Certificates. Observability is provided via Cloud Logging/Monitoring. DNS is managed in Cloud DNS.
 

@@ -8,6 +8,8 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+import asyncio
+
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -77,12 +79,16 @@ BOA_PASSWORD = os.getenv("BOA_PASSWORD", "")
 
 # Vertex Matching Engine (Vector Search) config
 USE_VERTEX_MATCHING = os.getenv("USE_VERTEX_MATCHING", "false").lower() == "true"
+ENABLE_VECTOR_UPSERTS = os.getenv("ENABLE_VECTOR_UPSERTS", "false").lower() == "true"
 VERTEX_EMBED_MODEL = os.getenv("VERTEX_EMBED_MODEL", "text-embedding-004")
 VERTEX_ME_INDEX_ENDPOINT = os.getenv("VERTEX_ME_INDEX_ENDPOINT", "")  # projects/../locations/../indexEndpoints/...
 VERTEX_ME_INDEX_DEPLOYED_ID = os.getenv("VERTEX_ME_INDEX_DEPLOYED_ID", "")
+VERTEX_ME_INDEX = os.getenv("VERTEX_ME_INDEX", "")  # projects/../locations/../indexes/...
 # Risk escalation rule: new recipient over amount threshold -> high risk
 NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD = float(os.getenv("NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD", "999"))
 NEW_RECIPIENT_MIN_SCORE = float(os.getenv("NEW_RECIPIENT_MIN_SCORE", "0.8"))
+# RAG history window
+RAG_HISTORY_LIMIT = int(os.getenv("RAG_HISTORY_LIMIT", "50"))
 
 
 # Load API key from file (Secret Manager CSI) if provided
@@ -526,7 +532,29 @@ async def _me_find_neighbor_ids(query_vec: list[float], k: int = 20) -> list[str
         return await anyio.to_thread.run_sync(_sync_query)
     except Exception as e:
         logger.info("me_query_failed", error=str(e))
-        return []
+
+async def _me_upsert_vector(tx_id: str, vec: list[float]) -> None:
+    """Background upsert into Vertex Matching Engine index. Best-effort, never crash caller."""
+    if not (USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS):
+        return
+    if not VERTEX_ME_INDEX:
+        logger.info("vector_upsert_skipped", reason="no_index_configured")
+        return
+    try:
+        import anyio
+        def _sync_upsert() -> None:
+            from google.cloud import aiplatform
+            aiplatform.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+            # MatchingEngineIndexDatapoint is available via aiplatform
+            from google.cloud.aiplatform.matching_engine import MatchingEngineIndexDatapoint  # type: ignore
+            index = aiplatform.MatchingEngineIndex(index_name=VERTEX_ME_INDEX)
+            dp = MatchingEngineIndexDatapoint(datapoint_id=str(tx_id), feature_vector=list(vec))
+            index.upsert_datapoints([dp])
+        await anyio.to_thread.run_sync(_sync_upsert)
+        logger.info("vector_upsert_ok", tx_id=str(tx_id), dims=len(vec))
+    except Exception as e:
+        logger.info("vector_upsert_failed", error=str(e))
+
 
 
 async def _fetch_minimal_txns_by_ids(ids: list[str]) -> list[dict]:
@@ -1262,8 +1290,8 @@ async def analyze_transaction(transaction: Transaction):
             amount=transaction.amount
         )
 
-        # RAG: fetch and summarize account history (now up to 100)
-        history = await fetch_account_history(transaction.account_id, limit=100)
+        # RAG: fetch and summarize account history (env-controlled window)
+        history = await fetch_account_history(transaction.account_id, limit=RAG_HISTORY_LIMIT)
         try:
             rag_summary = summarize_history_for_rag(history)
         except Exception as e:
@@ -1311,6 +1339,15 @@ async def analyze_transaction(transaction: Transaction):
                     rationale=rationale_val,
                     timestamp=datetime.utcnow()
                 )
+                # Fire-and-forget vector upsert (only allowed fields)
+                if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+                    try:
+                        embed_text = _build_embedding_text(tx_payload)
+                        qvec = await _embed_text(embed_text)
+                        if qvec:
+                            asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+                    except Exception as ue:
+                        logger.info("vector_upsert_failed", error=str(ue))
                 logger.info(
                     "risk_analysis_completed",
                     transaction_id=transaction.transaction_id,
@@ -1530,6 +1567,17 @@ async def analyze_transaction(transaction: Transaction):
             transaction_id=transaction.transaction_id,
             risk_score=risk_score.risk_score
         )
+
+        # Fire-and-forget vector upsert (only allowed fields)
+        if USE_VERTEX_MATCHING and ENABLE_VECTOR_UPSERTS:
+            try:
+                embed_text = _build_embedding_text(tx_payload)
+                qvec = await _embed_text(embed_text)
+                if qvec:
+                    asyncio.create_task(_me_upsert_vector(transaction.transaction_id, qvec))
+            except Exception as ue:
+                logger.info("vector_upsert_failed", error=str(ue))
+
 
         # Send to explain agent for further processing
         if not DISABLE_EXPLAIN_AGENT:

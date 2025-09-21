@@ -46,6 +46,14 @@ container:
       value: "http://userservice.boa.svc.cluster.local:8080"
     - name: BOA_HISTORY_URL
       value: "http://transactionhistory.boa.svc.cluster.local:8080"
+    # Vector upsert + RAG controls
+    - name: ENABLE_VECTOR_UPSERTS
+      value: "true"
+    - name: RAG_HISTORY_LIMIT
+      value: "50"
+    # Optional: Index resource for upserts (projects/.../locations/.../indexes/INDEX_ID)
+    - name: VERTEX_ME_INDEX
+      value: ""
     # Business rule thresholds: escalate new recipient over amount to HIGH
     - name: NEW_RECIPIENT_HIGH_AMOUNT_THRESHOLD
       value: "999"
