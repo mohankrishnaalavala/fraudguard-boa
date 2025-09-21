@@ -60,20 +60,24 @@ Use the BoA demo credentials shown on the BoA login page of your deployment (do 
 
 ## Architecture diagram (conceptual)
 
+The latest diagram is maintained at images/architecture.png and a detailed flow is documented in TECHNICAL.md. Updated conceptual flow:
+
 ```text
-[ BoA UI ] -> [ BoA Services ] --(JWT, APIs)--> [ boa-monitor ] --POST--> [ mcp-gateway ]
+[ BoA UI/Services ] --(JWT, APIs)--> [ boa-monitor ] --POST--> [ mcp-gateway ]
+                                                |                      |
+                                                |                      v
+                                          [ risk-scorer ] <---- GET /accounts/{id}/transactions
                                                 |
                                                 v
-                                         [ risk-scorer ] <--GET /accounts/{id}/transactions--
+                                         [ explain-agent ] -> [ action-orchestrator ]
                                                 |
                                                 v
-                                          [ explain-agent ] ---> [ action-orchestrator ]
-                                                |
-                                                v
-                                           [ Dashboard ] (High/Medium/Low)
+                                            [ dashboard ] (High/Medium/Low)
+
+[ txn-watcher (demo feeder) ] --POST--> [ mcp-gateway ]  (shares the same risk pipeline)
 
 GKE Autopilot, Ingress + Managed Certs, Workload Identity, NetworkPolicy, Cloud Logging/Monitoring
-(No changes to BoA core; extension via APIs only)
+(No BoA core changes; API-only integration)
 ```
 
 ---
