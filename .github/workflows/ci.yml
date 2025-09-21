@@ -40,8 +40,8 @@ jobs:
         done
         
         # Install dashboard dependencies
-        if [ -f "web/dashboard/requirements.txt" ]; then
-          pip install -r "web/dashboard/requirements.txt"
+        if [ -f "services/dashboard/requirements.txt" ]; then
+          pip install -r "services/dashboard/requirements.txt"
         fi
 
     - name: Lint with ruff
@@ -63,9 +63,9 @@ jobs:
         done
         
         # Run dashboard tests
-        if [ -f "web/dashboard/test_*.py" ] || [ -d "web/dashboard/tests/" ]; then
+        if ls services/dashboard/test_*.py >/dev/null 2>&1 || [ -d "services/dashboard/tests/" ]; then
           echo "Running dashboard tests"
-          cd web/dashboard && python -m pytest . && cd ../..
+          cd services/dashboard && python -m pytest . && cd ../..
         fi
 
   security-scan:
@@ -109,21 +109,24 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v1
+    - name: Authenticate to Google Cloud (WIF)
+      uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER_NAME }}
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT_EMAIL }}
 
     - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v1
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ env.PROJECT_ID }}
+        install_components: 'gke-gcloud-auth-plugin'
 
     - name: Configure Docker to use gcloud as a credential helper
       run: gcloud auth configure-docker us-docker.pkg.dev --quiet
 
     - name: Build and push Docker images
       run: |
-        # Set image tag based on branch
+        SHA="${{ github.sha }}"
         case "${{ github.ref }}" in
           refs/heads/main) TAG="latest" ;;
           refs/heads/develop) TAG="dev" ;;
@@ -131,12 +134,13 @@ jobs:
           *) TAG="dev" ;;
         esac
 
-        # Build and push all service images (including dashboard)
         SERVICES="mcp-gateway risk-scorer explain-agent action-orchestrator boa-monitor dashboard"
         for service in $SERVICES; do
-          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/$service:$TAG"
-          docker build -t $IMAGE_NAME services/$service/
-          docker push $IMAGE_NAME
+          BASE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/$service"
+          docker build -t "$BASE:$SHA" services/$service/
+          docker push "$BASE:$SHA"
+          docker tag "$BASE:$SHA" "$BASE:$TAG"
+          docker push "$BASE:$TAG"
         done
 
   deploy:
@@ -153,18 +157,26 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v1
+    - name: Authenticate to Google Cloud (WIF)
+      uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER_NAME }}
         service_account: ${{ secrets.WIF_SERVICE_ACCOUNT_EMAIL }}
 
     - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v1
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ env.PROJECT_ID }}
+        install_components: 'gke-gcloud-auth-plugin'
+
+    - name: Enable GKE auth plugin
+      run: echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
     - name: Get GKE credentials
       run: |
-        gcloud container clusters get-credentials ${{ env.CLUSTER_NAME }} --region ${{ env.CLUSTER_ZONE }}
+        gcloud container clusters get-credentials ${{ env.CLUSTER_NAME }} \
+          --region ${{ env.CLUSTER_ZONE }} \
+          --project ${{ env.PROJECT_ID }}
 
     - name: Install Helm
       uses: azure/setup-helm@v3
@@ -176,17 +188,32 @@ jobs:
         # Set namespace based on branch
         if [ "${{ github.ref }}" = "refs/heads/main" ]; then
           NAMESPACE="fraudguard-prod"
-          TAG="latest"
         else
           NAMESPACE="fraudguard"
-          TAG="dev"
         fi
-        
+
         # Create namespace if it doesn't exist
         kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-        
-        # Deploy all services
-        make deploy-all NAMESPACE=$NAMESPACE TAG=$TAG
+
+        # Deploy all services with Helm, pinning image.tag to commit SHA to force rollout
+        SERVICES=("mcp-gateway" "risk-scorer" "explain-agent" "action-orchestrator" "dashboard" "boa-monitor")
+        for service in "${SERVICES[@]}"; do
+          echo "Deploying $service..."
+          if ! helm upgrade --install "$service" ./helm/workload \
+            -f "values/$service.yaml" \
+            -n "$NAMESPACE" \
+            --set image.tag="${{ github.sha }}" \
+            --atomic --wait --timeout=600s; then
+            echo "Helm failed for $service – diagnostics:"
+            kubectl get pods -n "$NAMESPACE" -o wide || true
+            kubectl describe deploy/"$service" -n "$NAMESPACE" || true
+            kubectl describe pods -n "$NAMESPACE" | tail -n +1 || true
+            exit 1
+          fi
+        done
+
+        # Apply external LoadBalancer services (optional but consistent with deploy.yml)
+        kubectl apply -f k8s/external-services.yaml || true
 
     - name: Verify deployment
       run: |
