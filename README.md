@@ -8,6 +8,9 @@ FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA tran
 
 - Built on Bank of Anthos: https://github.com/GoogleCloudPlatform/bank-of-anthos
 - Deployed on GKE Autopilot with Google Managed Certs and Ingress
+- Live Demo:
+  - Dashboard: https://fraudguard.mohankrishna.site/ (username/pasword: admin/admin)
+  - Bank of Anthos: https://boa.mohankrishna.site/
 
 ## Components on GKE
 - mcp-gateway: Ingests/stores transactions, exposes APIs to UI and services
@@ -43,7 +46,7 @@ FraudGuard is an AI extension built on Bank of Anthos (BoA). It ingests BoA tran
 5) Configure Managed Certificates and Cloud DNS for fraudguard.mohankrishna.site and boa.mohankrishna.site
 
 ## Quickstart (≤5 min)
-- Make a transfer in BoA UI https://boa.mohankrishna.site/login, then open dashboard: https://fraudguard.mohankrishna.site/
+- Make a transfer in BoA UI https://boa.mohankrishna.site/login, then open dashboard: https://fraudguard.mohankrishna.site/ (username/pasword: admin/admin)
 - Watch risk buckets update (High/Medium/Low) and logs in risk-scorer/mcp-gateway
 
 ## Test creds

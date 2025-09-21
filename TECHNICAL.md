@@ -3,7 +3,7 @@
 ## 0. Top metadata (at-a-glance)
 - One-liner: FraudGuard adds AI-powered fraud risk scoring to Bank of Anthos without changing BoA core – API-only integration, deployable on GKE Autopilot.
 - Live Demo:
-  - Dashboard: https://fraudguard.mohankrishna.site/
+  - Dashboard: https://fraudguard.mohankrishna.site/ (username/pasword: admin/admin)
   - Bank of Anthos: https://boa.mohankrishna.site/
   - Test creds: use the demo credentials shown on your BoA login page (do not hardcode in docs).
 - Demo Commit/Tag: Deployed images are SHA-pinned per workflow run (see GitHub Actions logs for the exact commit SHA used in Helm `--set image.tag=<sha>`).
