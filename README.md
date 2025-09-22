@@ -12,7 +12,7 @@ Real-time fraud detection needs velocity/deviation/recipient analysis without di
 FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex AI** (with a small RAG window over recent history), and surfaces a **read-only** risk dashboard (High / Medium / Low). **No changes to BoA core; API-only integration.**
 
 **Links**
-- 🎥 **Submission video (≤ 3 min):** _ADD PUBLIC LINK HERE_
+- 🎥 **Submission video (≤ 3 min):** https://youtu.be/HCdyp5zH4Bo
 - 🌐 **Dashboard:** https://fraudguard.mohankrishna.site/  *(user/pass: `admin` / `admin`)*
 - 🏦 **BoA (demo):** https://boa.mohankrishna.site/
 - 📘 **Technical details:** [TECHNICAL.md](./TECHNICAL.md)
