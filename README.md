@@ -14,6 +14,8 @@ FraudGuard ingests BoA transactions via read-only APIs, applies **Gemini/Vertex 
 - 🌐 **Dashboard:** https://fraudguard.mohankrishna.site/  *(user/pass: `admin` / `admin`)*
 - 🏦 **BoA (demo):** https://boa.mohankrishna.site/
 - 📘 **Technical details:** [TECHNICAL.md](./TECHNICAL.md)
+- 📄 **Medium Post:** [medium.com/@mohankrishna](https://medium.com/@mohanalavala68/fraudguard-on-gke-an-api-only-agentic-fraud-layer-for-modern-banking-bank-of-anthos-2472e049a18d)
+- 📄 **LinkedIn Post:** [Linkedin](https://lnkd.in/p/g-yvaMa8)
 
 ---
 
