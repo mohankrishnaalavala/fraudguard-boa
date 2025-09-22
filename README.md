@@ -1,3 +1,5 @@
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/mohankrishnaalavala/fraudguard-boa/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 # FraudGuard on GKE — Bank of Anthos (API-only extension)
 
 **One-liner:** Agentic fraud risk analysis for **Bank of Anthos** on **GKE Autopilot** using **Gemini / Vertex AI** — **no BoA core changes**.
@@ -97,5 +99,3 @@ Expected
 ![FraudGuard dashboard](images/dashboard.png)
 
 ---
-
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
