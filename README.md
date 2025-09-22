@@ -99,4 +99,4 @@ Expected
 ![FraudGuard dashboard](images/dashboard.png)
 
 ---
-This project is as part of GKE Turns 10 **[Hackathon](https://gketurns10.devpost.com/)**.
+This project is built as part of GKE Turns 10 **[Hackathon](https://gketurns10.devpost.com/)**.
