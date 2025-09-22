@@ -219,3 +219,81 @@
 - Make Vertex path default; richer features; BigQuery/Feature Store; streaming (Pub/Sub)
 - Alerting/notifications; policy-as-code for actions; audit viewer; expanded A2A/ADK/MCP tooling
 
+
+## 22. CI/CD with GitHub Actions (reference)
+- Location: put workflows under `.github/workflows/` in this repo. Two recommended pipelines:
+  1) `ci.yaml` (PR validation): lint + unit tests + security scan (Trivy) + SBOM
+  2) `deploy.yaml` (main/tags): build+push images to Artifact Registry, then Helm upgrade on GKE
+
+- Required repo secrets/vars (no secrets in code):
+  - `GCP_WORKLOAD_IDENTITY_PROVIDER` (WIF provider resource)
+  - `GCP_SERVICE_ACCOUNT` (deploy SA email bound to WIF)
+  - `GCP_PROJECT_ID`, `GCP_REGION` (e.g., us-central1)
+  - Optional: `CLUSTER_NAME`, `CLUSTER_LOCATION` if deploy from Actions
+
+- CI (example stages):
+  - Checkout → Setup Python 3.11 → Install tooling (`ruff`, `black`, `pytest`) →
+    Install service deps (per `services/*/requirements.txt`) → `make lint` → `make test`
+  - Trivy: scan Dockerfiles/images; fail on HIGH/CRITICAL findings
+  - SBOM: generate CycloneDX for each service image and upload as artifact
+
+- CD (example stages):
+  - Auth to GCP via WIF → `gcloud auth configure-docker` for Artifact Registry
+  - Build/push all service images tagged with `${{ github.sha }}`
+  - `helm upgrade --install <svc> ./helm/workload -n fraudguard -f values/<svc>.yaml --set image.tag=${{ github.sha }} --atomic --wait`
+  - Post-deploy smoke: `kubectl wait` for Deployments; optionally curl `/healthz`
+
+- Notes/compliance:
+  - Keep logs JSON; never emit PII. Every service must expose `GET /healthz`
+  - Principle of least privilege SA; NetworkPolicy; runAsNonRoot; readOnlyRootFilesystem
+  - Actions should upload test reports and SBOM artifacts; gate merges on green CI and clean Trivy
+
+Example skeleton (place in `.github/workflows/ci.yaml`):
+```yaml
+name: CI
+on: [pull_request, push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install ruff black pytest
+      - run: |
+          pip install -r services/mcp-gateway/requirements.txt \
+                      -r services/risk-scorer/requirements.txt \
+                      -r services/explain-agent/requirements.txt \
+                      -r services/action-orchestrator/requirements.txt
+      - run: make lint && make test
+```
+
+## 23. Tests: locations, coverage, how to run
+- Framework: pytest. See per-service tests:
+  - `services/mcp-gateway/test_main.py`
+  - `services/risk-scorer/test_main.py`
+  - `services/explain-agent/test_main.py`
+  - `services/action-orchestrator/test_main.py`
+  - (dashboard/web test optional if present)
+
+- What’s covered (high level):
+  - `GET /healthz` returns 200 and correct payload per service
+  - Business rules: new-recipient > $999 HIGH and deviation rule (amount ≥ 9× typical) escalates to HIGH
+  - Logging: structured JSON events present (e.g., request_started/completed, risk_analysis_started/completed)
+  - Error handling paths don’t crash; unknown errors logged and return 5xx
+  - Service-to-service calls are mocked; no network or PII in tests
+
+- Run everything (from repo root):
+  - `cd fraudguard-boa && make test`
+
+- Run a single service’s tests:
+  - `cd fraudguard-boa/services/mcp-gateway && python -m pytest -v`
+
+- Lint/format checks:
+  - `cd fraudguard-boa && make lint`
+  - Or directly: `python -m ruff check .` and `python -m black --check .`
+
+- CI expectations:
+  - PRs must pass lint + tests. CI will fail on Trivy HIGH/CRITICAL issues and publish SBOM
+  - Minimal unit tests should exist for new modules and `/healthz`; keep type/lint checks passing
+  - Add/update tests alongside code changes; prefer smallest scope runs locally before pushing
