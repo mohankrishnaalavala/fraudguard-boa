@@ -1,6 +1,6 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/mohankrishnaalavala/fraudguard-boa/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
-# FraudGuard on GKE — Bank of Anthos (API-only extension)
+[![CI](https://github.com/mohankrishnaalavala/fraudguard-boa/actions/workflows/deploy.yml/badge.svg)](../../actions/workflows/deploy.yml)
+# FraudGuard on GKE — Bank of Anthos (API-only extension) using Gemini/Vertex AI
 
 **One-liner:** Agentic fraud risk analysis for **Bank of Anthos** on **GKE Autopilot** using **Gemini / Vertex AI** — **no BoA core changes**.
 **Same cluster:** namespaces **`boa`** (BoA) and **`fraudguard`** (FraudGuard).
@@ -99,3 +99,4 @@ Expected
 ![FraudGuard dashboard](images/dashboard.png)
 
 ---
+This project is as part of GKE Turns 10 **[Hackathon](https://gketurns10.devpost.com/)**.
